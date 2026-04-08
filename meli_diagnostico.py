@@ -16,11 +16,34 @@ from google.genai import types
 
 # ─── CONFIGURAÇÕES ───────────────────────────────────────────────────────────
 TOKEN_FILE = "meli_tokens.json"
-GEMINI_API_KEY = os.environ.get(
-    "GEMINI_API_KEY", "AIzaSyD7rJNdjuWUB2ZrWUOUEZxdwphdUXEwzTc"
-)
+GEMINI_KEY_FILE = "gemini_key.txt"
 GEMINI_MODEL = "gemini-2.5-flash"
 ML_BASE_URL = "https://api.mercadolibre.com"
+
+
+def load_gemini_api_key() -> str:
+    """
+    Carrega a chave do Gemini, em ordem de prioridade:
+      1. Variável de ambiente GEMINI_API_KEY
+      2. Arquivo local gemini_key.txt (que NÃO deve ser commitado)
+    Nunca hardcoded — chaves expostas em repo público são automaticamente
+    revogadas pelo Google.
+    """
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if key:
+        return key
+
+    if os.path.exists(GEMINI_KEY_FILE):
+        with open(GEMINI_KEY_FILE, "r", encoding="utf-8") as f:
+            key = f.read().strip()
+        if key:
+            return key
+
+    print("❌ Erro: chave do Gemini não encontrada.")
+    print("   Defina a variável de ambiente GEMINI_API_KEY ou crie um")
+    print(f"   arquivo '{GEMINI_KEY_FILE}' (já está no .gitignore) contendo")
+    print("   apenas a chave gerada em https://aistudio.google.com/app/apikey")
+    sys.exit(1)
 
 # Credenciais da aplicação AJ MODA (mesmas do gerar_token.py).
 # Necessárias para usar o refresh_token e renovar o access_token.
@@ -228,11 +251,8 @@ def get_ml_data(mlb: str, access_token: str) -> dict:
 def auditar_com_gemini(dados_ml: dict) -> dict:
     print("🧠 Injetando dados no Gemini (google-genai) para auditoria de conversão...")
 
-    if not GEMINI_API_KEY:
-        print("❌ Erro: GEMINI_API_KEY não definida.")
-        sys.exit(1)
-
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    api_key = load_gemini_api_key()
+    client = genai.Client(api_key=api_key)
 
     prompt = f"""
 Analise os dados abaixo deste ANÚNCIO do Mercado Livre e produza um laudo
