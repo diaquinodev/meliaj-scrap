@@ -22,10 +22,19 @@ GEMINI_API_KEY = os.environ.get(
 GEMINI_MODEL = "gemini-2.5-flash"
 ML_BASE_URL = "https://api.mercadolibre.com"
 
+# Credenciais da aplicação AJ MODA (mesmas do gerar_token.py).
+# Necessárias para usar o refresh_token e renovar o access_token.
+ML_CLIENT_ID = "516207596659548"
+ML_CLIENT_SECRET = "ClU8y12DuAFf7SDEeh5dp22aViwu9l3i"
+
 # MLB = anúncio (ex.: MLB123456789). MLBU = produto do catálogo universal.
 # As rotas /items/{id}, /description e /health só aceitam MLB de ANÚNCIO.
 MLB_PATTERN = re.compile(r"^MLB\d+$")
 MLBU_PATTERN = re.compile(r"^MLBU\d+$")
+
+
+class TokenExpiredError(RuntimeError):
+    """Levantada quando a API do Meli devolve 401 (token expirado/invalidado)."""
 
 
 # ─── TOKEN ───────────────────────────────────────────────────────────────────
@@ -39,6 +48,48 @@ def load_tokens() -> dict:
     except json.JSONDecodeError as e:
         print(f"❌ Erro: {TOKEN_FILE} está corrompido ({e}).")
         sys.exit(1)
+
+
+def save_tokens(tokens: dict) -> None:
+    with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+        json.dump(tokens, f)
+
+
+def refresh_access_token(refresh_token: str) -> dict:
+    """Troca o refresh_token por um novo access_token via OAuth do Meli."""
+    print("🔄 Token expirado. Renovando via refresh_token...")
+
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": ML_CLIENT_ID,
+        "client_secret": ML_CLIENT_SECRET,
+        "refresh_token": refresh_token,
+    }
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/x-www-form-urlencoded",
+    }
+
+    try:
+        res = requests.post(
+            f"{ML_BASE_URL}/oauth/token", data=payload, headers=headers, timeout=20
+        )
+    except requests.RequestException as e:
+        raise RuntimeError(f"Falha de rede ao renovar token: {e}") from e
+
+    if res.status_code != 200:
+        raise RuntimeError(
+            f"Falha ao renovar token (HTTP {res.status_code}): {res.text[:300]}\n"
+            "O refresh_token também pode ter expirado — rode o gerar_token.py."
+        )
+
+    new_tokens = res.json()
+    if "access_token" not in new_tokens:
+        raise RuntimeError(f"Resposta de refresh sem access_token: {new_tokens}")
+
+    save_tokens(new_tokens)
+    print("✅ Token renovado com sucesso e gravado em meli_tokens.json.")
+    return new_tokens
 
 
 # ─── VALIDAÇÃO RIGOROSA DE MLB vs MLBU ───────────────────────────────────────
@@ -102,8 +153,8 @@ def get_ml_data(mlb: str, access_token: str) -> dict:
     status_item, item_data = _get_json(f"{ML_BASE_URL}/items/{mlb}", headers)
 
     if status_item == 401:
-        raise RuntimeError(
-            "Token de acesso inválido ou expirado. Rode o gerar_token.py novamente."
+        raise TokenExpiredError(
+            "Token de acesso inválido ou expirado."
         )
     if status_item == 403:
         raise RuntimeError(
@@ -352,6 +403,22 @@ if __name__ == "__main__":
 
     try:
         dados = get_ml_data(mlb, access_token)
+    except TokenExpiredError:
+        # Tenta renovar automaticamente usando o refresh_token salvo.
+        refresh_token = tokens.get("refresh_token")
+        if not refresh_token:
+            print(
+                "❌ Token expirado e nenhum refresh_token salvo. "
+                "Rode o gerar_token.py."
+            )
+            sys.exit(1)
+        try:
+            tokens = refresh_access_token(refresh_token)
+            access_token = tokens["access_token"]
+            dados = get_ml_data(mlb, access_token)
+        except (RuntimeError, TokenExpiredError) as e:
+            print(f"❌ {e}")
+            sys.exit(1)
     except RuntimeError as e:
         print(f"❌ {e}")
         sys.exit(1)
