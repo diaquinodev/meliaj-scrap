@@ -57,6 +57,14 @@ ML_CLIENT_SECRET = "ClU8y12DuAFf7SDEeh5dp22aViwu9l3i"
 MLB_PATTERN = re.compile(r"^MLB\d+$")
 MLBU_PATTERN = re.compile(r"^MLBU\d+$")
 
+# Atributos que NUNCA devem ser sugeridos nem enviados via PUT /items.
+# Códigos de identificação de produto têm formato rígido (números de
+# 8 a 14 dígitos, com checksum) e o Meli rejeita com HTTP 400 se
+# receber qualquer texto livre. A blocklist é usada em dois lugares:
+#   1) filtrar_atributos_candidatos() — removidos antes de chegar na IA
+#   2) aplicar_melhorias() — removidos de novo antes do PUT, por segurança
+ATTR_BLOCKLIST = {"GTIN", "EAN", "UPC", "ISBN"}
+
 
 class TokenExpiredError(RuntimeError):
     """Levantada quando a API do Meli devolve 401 (token expirado/invalidado)."""
@@ -349,6 +357,11 @@ def filtrar_atributos_candidatos(
         if not aid or aid in filled:
             continue
 
+        # Nunca mostra identificadores de produto à IA — formato rígido
+        # que causa HTTP 400 se preenchido com texto livre.
+        if aid.upper() in ATTR_BLOCKLIST:
+            continue
+
         tags = attr.get("tags") or {}
         if isinstance(tags, dict) and (tags.get("hidden") or tags.get("read_only")):
             continue
@@ -536,20 +549,25 @@ Quando um atributo tem "allowed_values", escolha APENAS um valor da lista.
 Nota média: {rating_avg} | Distribuição: {total_reviews}
 
 INSTRUÇÕES CRÍTICAS:
-1. Para cada atributo de moda que puder ser preenchido, use EXATAMENTE o
+1. NUNCA, em NENHUMA hipótese, sugira os atributos GTIN, EAN, UPC, ISBN,
+   SELLER_SKU ou qualquer código de identificação de produto. Esses
+   campos têm formato rígido (números de 8 a 14 dígitos) e preenchê-los
+   com texto livre quebra o PUT /items com HTTP 400. Se aparecerem na
+   lista ATRIBUTOS_DISPONIVEIS_NA_CATEGORIA, IGNORE-OS completamente.
+2. Para cada atributo de moda que puder ser preenchido, use EXATAMENTE o
    "id" da lista ATRIBUTOS_DISPONIVEIS_NA_CATEGORIA. Não invente IDs nem
    use nomes em português como ID.
-2. Avalie se o título está otimizado: até 60 caracteres, palavra-chave no
+3. Avalie se o título está otimizado: até 60 caracteres, palavra-chave no
    início, sem caps-lock, sem ícones proibidos. Analise o que as perguntas
    dos compradores revelam sobre dúvidas que o título/descrição não cobrem.
-3. Analise a saúde, tags, sub_status e ações do Meli, traduzindo em ações
+4. Analise a saúde, tags, sub_status e ações do Meli, traduzindo em ações
    práticas. Se a taxa de conversão for baixa, recomende ações específicas.
-4. Na "descricao_otimizada", aplique AIDA, com quebras de linha e sem
+5. Na "descricao_otimizada", aplique AIDA, com quebras de linha e sem
    emojis proibidos. ANTECIPE e responda as dúvidas que apareceram nas
    perguntas recentes dos compradores.
-5. Em "respostas_perguntas_frequentes", para cada pergunta recente sugira
+6. Em "respostas_perguntas_frequentes", para cada pergunta recente sugira
    uma resposta curta e persuasiva.
-6. Responda EXCLUSIVAMENTE com JSON válido no schema pedido.
+7. Responda EXCLUSIVAMENTE com JSON válido no schema pedido.
 """.strip()
 
     system_instruction = (
@@ -749,11 +767,24 @@ def aplicar_melhorias(
         item_payload["title"] = novo_titulo
 
     attr_payload = []
+    ignorados_blocklist = []
     for a in laudo.get("atributos_sugeridos") or []:
-        aid = (a.get("id") or "").strip()
+        aid = (a.get("id") or "").strip().upper()
         val = (a.get("value_name") or "").strip()
-        if aid and val:
-            attr_payload.append({"id": aid, "value_name": val})
+        if not aid or not val:
+            continue
+        # Blocklist dupla: mesmo que a IA alucine um GTIN/EAN/UPC, nunca
+        # deixamos passar para o PUT /items — o Meli valida formato
+        # rígido nesses campos e qualquer texto livre causa HTTP 400.
+        if aid in ATTR_BLOCKLIST:
+            ignorados_blocklist.append(aid)
+            continue
+        attr_payload.append({"id": aid, "value_name": val})
+    if ignorados_blocklist:
+        print(
+            f"🛡️  Blocklist: removidos {len(ignorados_blocklist)} atributo(s) "
+            f"sensíveis sugeridos pela IA: {', '.join(ignorados_blocklist)}"
+        )
     if attr_payload:
         item_payload["attributes"] = attr_payload
 
