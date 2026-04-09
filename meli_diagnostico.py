@@ -58,12 +58,24 @@ MLB_PATTERN = re.compile(r"^MLB\d+$")
 MLBU_PATTERN = re.compile(r"^MLBU\d+$")
 
 # Atributos que NUNCA devem ser sugeridos nem enviados via PUT /items.
-# Códigos de identificação de produto têm formato rígido (números de
-# 8 a 14 dígitos, com checksum) e o Meli rejeita com HTTP 400 se
-# receber qualquer texto livre. A blocklist é usada em dois lugares:
+# Duas razões distintas:
+#   (a) Identificadores de produto (GTIN/EAN/UPC/ISBN) têm formato
+#       rígido (números de 8 a 14 dígitos com checksum) — texto livre
+#       quebra o PUT com HTTP 400.
+#   (b) Atributos de grade de variação (COLOR/SIZE/MAIN_COLOR) vivem
+#       em variation.attribute_combinations, não em item.attributes.
+#       Mandá-los no nível raiz causa "Same attributes are used in
+#       more than of item.attributes, variation.attribute_combinations
+#       and variation.attributes". Gestão de variações foge do escopo.
+# A blocklist é usada em dois lugares:
 #   1) filtrar_atributos_candidatos() — removidos antes de chegar na IA
 #   2) aplicar_melhorias() — removidos de novo antes do PUT, por segurança
-ATTR_BLOCKLIST = {"GTIN", "EAN", "UPC", "ISBN"}
+ATTR_BLOCKLIST = {
+    # Identificadores de produto
+    "GTIN", "EAN", "UPC", "ISBN",
+    # Atributos de variação (não vão no nível raiz)
+    "COLOR", "SIZE", "MAIN_COLOR",
+}
 
 
 class TokenExpiredError(RuntimeError):
@@ -549,11 +561,16 @@ Quando um atributo tem "allowed_values", escolha APENAS um valor da lista.
 Nota média: {rating_avg} | Distribuição: {total_reviews}
 
 INSTRUÇÕES CRÍTICAS:
-1. NUNCA, em NENHUMA hipótese, sugira os atributos GTIN, EAN, UPC, ISBN,
-   SELLER_SKU ou qualquer código de identificação de produto. Esses
-   campos têm formato rígido (números de 8 a 14 dígitos) e preenchê-los
-   com texto livre quebra o PUT /items com HTTP 400. Se aparecerem na
-   lista ATRIBUTOS_DISPONIVEIS_NA_CATEGORIA, IGNORE-OS completamente.
+1. NUNCA, em NENHUMA hipótese, sugira os atributos:
+   - GTIN, EAN, UPC, ISBN — códigos de identificação com formato
+     rígido numérico que quebram o PUT /items com HTTP 400 se
+     preenchidos com texto livre.
+   - COLOR, SIZE, MAIN_COLOR — são atributos de GRADE DE VARIAÇÃO e
+     vivem em variation.attribute_combinations, não em item.attributes.
+     Enviá-los no nível raiz causa "Same attributes are used in more
+     than of item.attributes, variation.attribute_combinations".
+   Se qualquer desses aparecer na lista ATRIBUTOS_DISPONIVEIS_NA_CATEGORIA,
+   IGNORE-OS completamente.
 2. Para cada atributo de moda que puder ser preenchido, use EXATAMENTE o
    "id" da lista ATRIBUTOS_DISPONIVEIS_NA_CATEGORIA. Não invente IDs nem
    use nomes em português como ID.
