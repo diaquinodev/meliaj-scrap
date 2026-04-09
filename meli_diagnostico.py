@@ -181,15 +181,35 @@ def resolver_mlbu_para_mlb(mlbu: str, access_token: str) -> str | None:
     Dado um MLBU (produto do catálogo universal), encontra o MLB do
     anúncio do vendedor autenticado que está publicado para esse
     produto. Retorna None se o vendedor não tiver nenhum anúncio
-    vinculado a esse MLBU.
+    vinculado ao MLBU (nem ao seu parent, se existir).
 
-    Tenta duas rotas, em ordem:
-      1. /users/{seller_id}/items/search?catalog_product_id={mlbu}
-      2. /sites/MLB/search?seller_id={seller_id}&catalog_product_id={mlbu}
+    Fluxo rigoroso:
+      1. GET /products/{mlbu} para descobrir se existe parent_id
+         (família de catálogo). Se sim, inclui o parent na busca.
+      2. GET /users/me para obter o seller_id.
+      3. Para cada candidato (mlbu e parent_id), faz
+         GET /sites/MLB/search?seller_id=X&catalog_product_id=ID
+         e VERIFICA que o catalog_product_id devolvido no JSON bate
+         exatamente com o que foi pedido — o Meli retorna a lista
+         genérica do vendedor quando não encontra match, então a
+         verificação evita falso positivo.
     """
     headers = {"Authorization": f"Bearer {access_token}"}
 
-    # 1. Descobre o seller_id do usuário autenticado
+    # 1. Tenta descobrir o parent_id do catálogo (família).
+    candidato_ids: list[str] = [mlbu]
+    status, produto = _get_json(f"{ML_BASE_URL}/products/{mlbu}", headers)
+    if status == 401:
+        raise TokenExpiredError("Token expirado ao consultar /products.")
+    if status == 200 and isinstance(produto, dict):
+        parent_id = produto.get("parent_id")
+        if parent_id and parent_id != mlbu:
+            print(f"   📦 {mlbu} pertence à família {parent_id} — incluindo na busca.")
+            candidato_ids.append(parent_id)
+    elif status == 404:
+        print(f"   ⚠️  /products/{mlbu} não encontrado — seguindo só com o MLBU.")
+
+    # 2. Descobre o seller_id do usuário autenticado.
     status, me = _get_json(f"{ML_BASE_URL}/users/me", headers)
     if status == 401:
         raise TokenExpiredError("Token expirado ao consultar /users/me.")
@@ -200,28 +220,38 @@ def resolver_mlbu_para_mlb(mlbu: str, access_token: str) -> str | None:
     if not seller_id:
         return None
 
-    # 2. Rota primária: items do seller filtrados por catalog_product_id
-    status, data = _get_json(
-        f"{ML_BASE_URL}/users/{seller_id}/items/search?catalog_product_id={mlbu}",
-        headers,
-    )
-    if status == 401:
-        raise TokenExpiredError("Token expirado ao buscar items do seller.")
-    if status == 200 and isinstance(data, dict):
-        results = data.get("results") or []
-        if results and isinstance(results[0], str):
-            return results[0]
+    # 3. Busca em /sites/MLB/search para cada candidato, com
+    #    VERIFICAÇÃO RIGOROSA do catalog_product_id retornado.
+    for cat_id in candidato_ids:
+        url = (
+            f"{ML_BASE_URL}/sites/MLB/search"
+            f"?seller_id={seller_id}&catalog_product_id={cat_id}"
+        )
+        status, data = _get_json(url, headers)
+        if status == 401:
+            raise TokenExpiredError("Token expirado em /sites/MLB/search.")
+        if status != 200 or not isinstance(data, dict):
+            continue
 
-    # 3. Fallback: busca pública do site filtrada por seller
-    status, data = _get_json(
-        f"{ML_BASE_URL}/sites/MLB/search?seller_id={seller_id}&catalog_product_id={mlbu}",
-        headers,
-    )
-    if status == 200 and isinstance(data, dict):
-        results = data.get("results") or []
-        for r in results:
-            if isinstance(r, dict) and r.get("id"):
-                return r["id"]
+        for result in data.get("results") or []:
+            if not isinstance(result, dict):
+                continue
+            returned_cat_id = result.get("catalog_product_id")
+            # RIGOR: só aceita match EXATO — se o Meli não achar o
+            # catalog_product_id pedido, ele devolve a lista genérica
+            # do vendedor, então um simples "results[0]" causaria
+            # falso positivo.
+            if returned_cat_id != cat_id:
+                continue
+            mlb = result.get("id")
+            if mlb:
+                print(
+                    f"   ✓ Match exato para catalog_product_id={cat_id}: "
+                    f"anúncio {mlb}"
+                )
+                return mlb
+
+        print(f"   ⚠️  Nenhum match exato encontrado para {cat_id}.")
 
     return None
 
@@ -298,6 +328,25 @@ def get_ml_data(mlb: str, access_token: str) -> dict:
     if not isinstance(health_data, dict):
         health_data = {}
 
+    # Raio-X de SIZE_GRID_ID: verifica se o anúncio tem Tabela de Medidas
+    # vinculada. Crítico em moda — sem tabela, a taxa de devolução dispara.
+    # O atributo pode aparecer no root (.attributes) OU dentro de variations;
+    # basta encontrar um valor não-vazio em qualquer lugar.
+    size_grid_id_valor = None
+    for a in item_data.get("attributes") or []:
+        if a.get("id") == "SIZE_GRID_ID":
+            size_grid_id_valor = a.get("value_name") or a.get("value_id")
+            break
+    if not size_grid_id_valor:
+        for v in item_data.get("variations") or []:
+            for a in v.get("attributes") or []:
+                if a.get("id") == "SIZE_GRID_ID":
+                    size_grid_id_valor = a.get("value_name") or a.get("value_id")
+                    break
+            if size_grid_id_valor:
+                break
+    tem_tabela_medidas = bool(size_grid_id_valor)
+
     return {
         "id": item_data.get("id", mlb),
         "seller_id": item_data.get("seller_id"),
@@ -320,6 +369,8 @@ def get_ml_data(mlb: str, access_token: str) -> dict:
         "descricao": desc_data.get("plain_text") or "Sem descrição",
         "saude": health_data.get("health", "N/A"),
         "acoes_saude": health_data.get("actions", []),
+        "tem_tabela_medidas": tem_tabela_medidas,
+        "size_grid_id": size_grid_id_valor,
     }
 
 
@@ -409,20 +460,37 @@ def get_category_attributes(category_id: str, headers: dict) -> list:
 def filtrar_atributos_candidatos(
     category_attrs: list, item_attrs: list, limit: int = 35
 ) -> list:
-    """Atributos ainda não preenchidos no anúncio, prontos para a IA sugerir."""
+    """Atributos ainda não preenchidos no anúncio, prontos para a IA sugerir.
+
+    Exceção estratégica: MODEL é SEMPRE incluído, mesmo quando já preenchido,
+    porque é um hack de SEO — a IA reescreve no formato
+    [Tipo] + [Material] + [Ocasião] para turbinar o ranqueamento.
+    """
+    filled_map = {
+        a.get("id"): a.get("valor")
+        for a in (item_attrs or [])
+        if a.get("id")
+    }
     filled = {
-        a.get("id") for a in (item_attrs or []) if a.get("valor") not in (None, "")
+        aid for aid, valor in filled_map.items() if valor not in (None, "")
     }
 
     candidatos = []
     for attr in category_attrs or []:
         aid = attr.get("id")
-        if not aid or aid in filled:
+        if not aid:
+            continue
+
+        aid_upper = aid.upper()
+        is_model = aid_upper == "MODEL"
+
+        # Já preenchidos são descartados, EXCETO MODEL (SEO override).
+        if aid in filled and not is_model:
             continue
 
         # Nunca mostra identificadores de produto à IA — formato rígido
         # que causa HTTP 400 se preenchido com texto livre.
-        if aid.upper() in ATTR_BLOCKLIST:
+        if aid_upper in ATTR_BLOCKLIST:
             continue
 
         tags = attr.get("tags") or {}
@@ -444,9 +512,21 @@ def filtrar_atributos_candidatos(
         if isinstance(tags, dict) and tags.get("required"):
             candidato["required"] = True
 
+        if is_model:
+            # Marcadores para a IA entender que deve sobrescrever.
+            candidato["current_value"] = filled_map.get(aid)
+            candidato["override_with_seo_hack"] = True
+            candidato["seo_hack_format"] = "[Tipo] + [Material] + [Ocasião]"
+
         candidatos.append(candidato)
 
-    candidatos.sort(key=lambda c: 0 if c.get("required") else 1)
+    # MODEL no topo (hack de SEO), depois required, depois o resto.
+    def _rank(c: dict) -> tuple:
+        if (c.get("id") or "").upper() == "MODEL":
+            return (0, 0)
+        return (1, 0 if c.get("required") else 1)
+
+    candidatos.sort(key=_rank)
     return candidatos[:limit]
 
 
@@ -593,6 +673,13 @@ de diagnóstico com foco em CONVERSÃO, REGRAS DO MELI e SEO para MODA.
 - Vendas: {dados_ml.get('sales_30d', 'N/A')}
 - Taxa de conversão: {dados_ml.get('conversao_30d_pct', 'N/A')}%
 
+=== RAIO-X TABELA DE MEDIDAS ===
+- tem_tabela_medidas (SIZE_GRID_ID presente): {dados_ml.get('tem_tabela_medidas', False)}
+- SIZE_GRID_ID atual: {dados_ml.get('size_grid_id') or '(nenhum)'}
+Se False, ATIVE a regra de tabela de medidas do system_instruction: alerte
+em pontos_criticos e recomende em acoes_saude_recomendadas criar/vincular
+uma Tabela de Medidas no Mercado Livre (crítico em moda).
+
 === DESCRIÇÃO ATUAL ===
 {dados_ml['descricao']}
 
@@ -640,8 +727,26 @@ INSTRUÇÕES CRÍTICAS:
 
     system_instruction = (
         "Você é um auditor sênior de Mercado Livre e especialista em SEO e "
-        "ranqueamento para e-commerce de moda. Responda sempre em português "
-        "do Brasil, de forma objetiva, prática e acionável."
+        "ranqueamento para e-commerce de moda (AJ Moda). Responda sempre em "
+        "português do Brasil, de forma objetiva, prática e acionável.\n\n"
+        "REGRA DE SEO - ATRIBUTO MODEL (OBRIGATÓRIA):\n"
+        "Sempre que o atributo MODEL aparecer em ATRIBUTOS_DISPONIVEIS_NA_CATEGORIA "
+        "(mesmo que já esteja preenchido e marcado com 'override_with_seo_hack'), "
+        "você DEVE incluí-lo em 'atributos_sugeridos' reescrevendo seu valor no "
+        "formato exato:\n"
+        "    [Tipo] + [Material] + [Ocasião]\n"
+        "Exemplos válidos: 'Chamise Linho Casual', 'Blazer Alfaiataria Trabalho', "
+        "'Vestido Midi Viscose Festa', 'Camisa Tricoline Social'.\n"
+        "Regras do MODEL: máximo de 4 palavras, sem vírgulas, sem travessões, "
+        "sem palavras genéricas como 'moda' ou 'feminino', use substantivos "
+        "concretos que compradores digitam na busca. Isso é um HACK DE SEO "
+        "e DEVE sobrescrever o valor atual, nunca repita o valor antigo.\n\n"
+        "REGRA DE TABELA DE MEDIDAS:\n"
+        "Quando 'tem_tabela_medidas' for False/null, inclua em 'pontos_criticos' "
+        "um alerta sobre a AUSÊNCIA DE TABELA DE MEDIDAS (SIZE_GRID_ID) e adicione "
+        "em 'acoes_saude_recomendadas' uma recomendação explícita para criar/vincular "
+        "uma tabela de medidas via Mercado Livre — isso é crítico em moda, reduz "
+        "devoluções e melhora a conversão."
     )
 
     response_schema = {
@@ -772,6 +877,14 @@ def imprimir_laudo(laudo: dict, dados_ml: dict, red_flags: list) -> None:
     print(f"📈 30 dias : visitas={v if v is not None else 'N/A'} | "
           f"vendas={s if s is not None else 'N/A'} | "
           f"conversão={c if c is not None else 'N/A'}%")
+
+    # Raio-X de Tabela de Medidas
+    tem_grid = dados_ml.get("tem_tabela_medidas")
+    grid_id = dados_ml.get("size_grid_id")
+    if tem_grid:
+        print(f"📏 Tabela de Medidas: ✓ presente (SIZE_GRID_ID={grid_id})")
+    else:
+        print("📏 Tabela de Medidas: ✗ AUSENTE — crítico em moda (SIZE_GRID_ID vazio)")
 
     # Red flags
     print("\n🚨 RED FLAGS DETECTADOS NO BACKEND:")
