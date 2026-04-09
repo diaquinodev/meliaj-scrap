@@ -175,6 +175,57 @@ def validar_mlb(codigo: str) -> str:
     return codigo
 
 
+# ─── RESOLUÇÃO MLBU → MLB ────────────────────────────────────────────────────
+def resolver_mlbu_para_mlb(mlbu: str, access_token: str) -> str | None:
+    """
+    Dado um MLBU (produto do catálogo universal), encontra o MLB do
+    anúncio do vendedor autenticado que está publicado para esse
+    produto. Retorna None se o vendedor não tiver nenhum anúncio
+    vinculado a esse MLBU.
+
+    Tenta duas rotas, em ordem:
+      1. /users/{seller_id}/items/search?catalog_product_id={mlbu}
+      2. /sites/MLB/search?seller_id={seller_id}&catalog_product_id={mlbu}
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    # 1. Descobre o seller_id do usuário autenticado
+    status, me = _get_json(f"{ML_BASE_URL}/users/me", headers)
+    if status == 401:
+        raise TokenExpiredError("Token expirado ao consultar /users/me.")
+    if status != 200 or not isinstance(me, dict):
+        print(f"⚠️  Não foi possível identificar o vendedor autenticado (HTTP {status}).")
+        return None
+    seller_id = me.get("id")
+    if not seller_id:
+        return None
+
+    # 2. Rota primária: items do seller filtrados por catalog_product_id
+    status, data = _get_json(
+        f"{ML_BASE_URL}/users/{seller_id}/items/search?catalog_product_id={mlbu}",
+        headers,
+    )
+    if status == 401:
+        raise TokenExpiredError("Token expirado ao buscar items do seller.")
+    if status == 200 and isinstance(data, dict):
+        results = data.get("results") or []
+        if results and isinstance(results[0], str):
+            return results[0]
+
+    # 3. Fallback: busca pública do site filtrada por seller
+    status, data = _get_json(
+        f"{ML_BASE_URL}/sites/MLB/search?seller_id={seller_id}&catalog_product_id={mlbu}",
+        headers,
+    )
+    if status == 200 and isinstance(data, dict):
+        results = data.get("results") or []
+        for r in results:
+            if isinstance(r, dict) and r.get("id"):
+                return r["id"]
+
+    return None
+
+
 # ─── API DO MERCADO LIVRE ────────────────────────────────────────────────────
 def _get_json(url: str, headers: dict) -> tuple[int, dict]:
     try:
@@ -982,9 +1033,52 @@ if __name__ == "__main__":
         sys.exit(1)
 
     entrada = args.mlb or input(
-        "👉 Digite o MLB do ANÚNCIO a ser auditado (ex.: MLB123456789): "
+        "👉 Digite o MLB do anúncio ou MLBU do produto "
+        "(ex.: MLB123456789 ou MLBU987654321): "
     )
-    mlb = validar_mlb(entrada)
+    codigo = (entrada or "").strip().upper()
+
+    if MLBU_PATTERN.match(codigo):
+        # Catálogo universal: resolver para o MLB do anúncio do próprio
+        # vendedor que publica esse produto.
+        print(
+            f"\n🔗 {codigo} é um produto do catálogo (MLBU). "
+            "Procurando seu anúncio vinculado..."
+        )
+        try:
+            mlb_resolvido = resolver_mlbu_para_mlb(codigo, access_token)
+        except TokenExpiredError:
+            refresh_token = tokens.get("refresh_token")
+            if not refresh_token:
+                print(
+                    "❌ Token expirado e nenhum refresh_token salvo. "
+                    "Rode o gerar_token.py."
+                )
+                sys.exit(1)
+            tokens = refresh_access_token(refresh_token)
+            access_token = tokens["access_token"]
+            try:
+                mlb_resolvido = resolver_mlbu_para_mlb(codigo, access_token)
+            except TokenExpiredError as e:
+                print(f"❌ {e}")
+                sys.exit(1)
+
+        if not mlb_resolvido:
+            print(f"❌ Não foi possível encontrar um anúncio SEU vinculado ao {codigo}.")
+            print("   Possíveis causas:")
+            print("   • Você não tem anúncio publicado para esse produto do catálogo")
+            print("   • O MLBU está digitado errado")
+            print("   • O anúncio está pausado/fechado e fora do índice público")
+            print(
+                "   💡 Dica: abra o anúncio no seu painel do Meli e copie o "
+                "MLB... que aparece na URL."
+            )
+            sys.exit(1)
+
+        print(f"✅ Resolvido: {codigo} → {mlb_resolvido}")
+        mlb = mlb_resolvido
+    else:
+        mlb = validar_mlb(codigo)
 
     try:
         dados = get_ml_data(mlb, access_token)
