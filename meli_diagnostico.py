@@ -769,6 +769,86 @@ def imprimir_laudo(laudo: dict, dados_ml: dict, red_flags: list) -> None:
 
 
 # ─── INJEÇÃO DAS MELHORIAS NO MERCADO LIVRE ─────────────────────────────────
+def _extrair_campos_rejeitados(error_json: dict) -> set:
+    """
+    Lê a resposta de erro do Meli e devolve o conjunto de campos raiz
+    citados como não-atualizáveis (field_not_updatable). Ex.: {"title"}.
+    Só considera o `field_not_updatable` — outros erros são fatais.
+    """
+    rejeitados = set()
+    for cause in (error_json or {}).get("cause") or []:
+        if not isinstance(cause, dict):
+            continue
+        if cause.get("code") != "field_not_updatable":
+            continue
+        for ref in cause.get("references") or []:
+            # refs vêm como "item.title", "item.attributes", etc.
+            if isinstance(ref, str) and ref.startswith("item."):
+                rejeitados.add(ref.split(".", 1)[1])
+    return rejeitados
+
+
+def _put_items_com_retry(mlb: str, item_payload: dict, headers: dict) -> None:
+    """
+    Tenta o PUT /items. Se o Meli responder 400 com `field_not_updatable`
+    em um ou mais campos (ex.: título bloqueado por já ter vendas), remove
+    os campos rejeitados do payload e tenta UMA vez de novo. Isso salva
+    os atributos quando só o título está bloqueado.
+    """
+    try:
+        res = requests.put(
+            f"{ML_BASE_URL}/items/{mlb}",
+            headers=headers,
+            json=item_payload,
+            timeout=20,
+        )
+    except requests.RequestException as e:
+        print(f"❌ Falha de rede em PUT /items: {e}")
+        return
+
+    if res.status_code == 200:
+        print("✅ /items atualizado com sucesso.")
+        return
+
+    # 400 — tentar extrair campos não-atualizáveis e re-submeter sem eles.
+    if res.status_code == 400:
+        try:
+            err = res.json()
+        except ValueError:
+            err = {}
+        rejeitados = _extrair_campos_rejeitados(err)
+        if rejeitados and any(f in item_payload for f in rejeitados):
+            payload_retry = {k: v for k, v in item_payload.items() if k not in rejeitados}
+            print(
+                f"🛡️  Campos não-atualizáveis detectados ({', '.join(sorted(rejeitados))}) "
+                f"— removidos do payload. Tentando novamente com: "
+                f"{', '.join(sorted(payload_retry.keys())) or '(nada)'}."
+            )
+            if not payload_retry:
+                print("⚠️  Nada restou para atualizar depois do filtro.")
+                return
+            try:
+                res2 = requests.put(
+                    f"{ML_BASE_URL}/items/{mlb}",
+                    headers=headers,
+                    json=payload_retry,
+                    timeout=20,
+                )
+            except requests.RequestException as e:
+                print(f"❌ Falha de rede no retry: {e}")
+                return
+            if res2.status_code == 200:
+                print("✅ /items atualizado com sucesso (sem os campos bloqueados).")
+            else:
+                print(
+                    f"❌ Retry também falhou (HTTP {res2.status_code}): "
+                    f"{res2.text[:400]}"
+                )
+            return
+
+    print(f"❌ PUT /items falhou (HTTP {res.status_code}): {res.text[:400]}")
+
+
 def aplicar_melhorias(
     mlb: str, laudo: dict, dados: dict, access_token: str, dry_run: bool = False
 ) -> None:
@@ -781,7 +861,15 @@ def aplicar_melhorias(
 
     novo_titulo = (laudo.get("titulo_otimizado") or "").strip()
     if novo_titulo and novo_titulo != dados.get("titulo"):
-        item_payload["title"] = novo_titulo
+        # Hard-enforce de 60 chars: o Meli rejeita com HTTP 400 e a IA
+        # eventualmente extrapola mesmo sendo instruída no prompt.
+        if len(novo_titulo) > 60:
+            print(
+                f"🛡️  Título sugerido tem {len(novo_titulo)} chars (limite 60). "
+                "Ignorando a mudança de título."
+            )
+        else:
+            item_payload["title"] = novo_titulo
 
     attr_payload = []
     ignorados_blocklist = []
@@ -842,20 +930,7 @@ def aplicar_melhorias(
         return
 
     if item_payload:
-        try:
-            res = requests.put(
-                f"{ML_BASE_URL}/items/{mlb}",
-                headers=headers,
-                json=item_payload,
-                timeout=20,
-            )
-        except requests.RequestException as e:
-            print(f"❌ Falha de rede em PUT /items: {e}")
-            return
-        if res.status_code == 200:
-            print("✅ /items atualizado com sucesso.")
-        else:
-            print(f"❌ PUT /items falhou (HTTP {res.status_code}): {res.text[:400]}")
+        _put_items_com_retry(mlb, item_payload, headers)
 
     if descricao_changed:
         try:
