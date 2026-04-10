@@ -130,9 +130,16 @@ def extrair_anuncio_base(mlb: str, access_token: str) -> dict:
             entry["value_name"] = st["value_name"]
         sale_terms_clone.append(entry)
 
+    # family_name: obrigatório em categorias de catálogo/moda. O Meli
+    # compõe o título automaticamente como family_name + sufixo de variação
+    # (ex.: "Conjunto Feminino Linho" + "Amarelo Lisa Gg"). Quando family_name
+    # existe, o campo title no POST é ignorado — o SEO mora no family_name.
+    family_name = data.get("family_name") or ""
+
     base = {
         "id_original": data.get("id"),
         "title": data.get("title", ""),
+        "family_name": family_name,
         "price": data.get("price"),
         "currency_id": data.get("currency_id", "BRL"),
         "category_id": data.get("category_id"),
@@ -152,6 +159,8 @@ def extrair_anuncio_base(mlb: str, access_token: str) -> dict:
     }
 
     print(f"   ✓ Título: {base['title']}")
+    if family_name:
+        print(f"   ✓ family_name: {family_name}")
     print(f"   ✓ Preço: {base['currency_id']} {base['price']}")
     print(f"   ✓ Categoria: {base['category_id']}")
     print(f"   ✓ Fotos: {len(base['pictures'])}")
@@ -228,12 +237,15 @@ def gerar_otimizacao_gemini(base: dict, intel: dict) -> dict:
         for a in base["attributes"][:30]
     ]
 
+    tem_family = bool(base.get("family_name"))
+
     prompt = f"""
 Você vai otimizar um CLONE de anúncio de moda feminina para o Mercado Livre.
 Abaixo estão os dados do anúncio base e a inteligência competitiva.
 
 === ANÚNCIO BASE (ESQUELETO) ===
 - Título original: {base['title']}
+- family_name (nome-família): {base.get('family_name') or '(não tem)'}
 - Preço original: {base['currency_id']} {base['price']}
 - Categoria: {base['category_id']}
 - Qtd disponível: {base['available_quantity']}
@@ -254,8 +266,7 @@ Abaixo estão os dados do anúncio base e a inteligência competitiva.
 
 INSTRUÇÕES:
 
-1. "novo_titulo": Crie um título OTIMIZADO para SEO (máximo 60 caracteres).
-   - Coloque a palavra-chave principal no início.
+1. {"'novo_family_name': o Meli EXIGE family_name nesta categoria. O título é gerado automaticamente como family_name + sufixo de variação (cor, tamanho). Otimize o family_name para SEO (máximo 55 chars para deixar margem para o sufixo). Coloque palavra-chave principal no início. Sem caps-lock total, sem emojis.' if tem_family else "'novo_titulo': Crie um título OTIMIZADO para SEO (máximo 60 caracteres). Coloque a palavra-chave principal no início."}
    - Use palavras das "top palavras-chave vencedoras" quando fizer sentido.
    - Sem caps-lock total, sem emojis, sem caracteres proibidos.
 
@@ -286,12 +297,21 @@ INSTRUÇÕES:
         "Responda em português do Brasil, de forma objetiva e acionável."
     )
 
+    # Schema dinâmico: se tem family_name, pede novo_family_name.
+    # Senão, pede novo_titulo.
+    titulo_prop_key = "novo_family_name" if tem_family else "novo_titulo"
+    titulo_prop_desc = (
+        "family_name otimizado para SEO (max 55 chars)."
+        if tem_family
+        else "Título otimizado (max 60 chars, SEO)."
+    )
+
     response_schema = {
         "type": "object",
         "properties": {
-            "novo_titulo": {
+            titulo_prop_key: {
                 "type": "string",
-                "description": "Título otimizado (max 60 chars, SEO).",
+                "description": titulo_prop_desc,
             },
             "novo_preco": {
                 "type": "number",
@@ -314,7 +334,7 @@ INSTRUÇÕES:
                 },
             },
         },
-        "required": ["novo_titulo", "novo_preco", "nova_descricao", "novos_atributos"],
+        "required": [titulo_prop_key, "novo_preco", "nova_descricao", "novos_atributos"],
     }
 
     try:
@@ -344,13 +364,26 @@ INSTRUÇÕES:
         print(f"Resposta bruta: {raw[:500]}")
         sys.exit(1)
 
-    novo_titulo = (resultado.get("novo_titulo") or "").strip()
-    if len(novo_titulo) > 60:
-        print(f"   🛡️  Título Gemini tem {len(novo_titulo)} chars — truncando para 60.")
-        novo_titulo = novo_titulo[:60].rsplit(" ", 1)[0]
+    # Normaliza: garante que o resultado sempre tenha as duas chaves
+    # (novo_titulo e novo_family_name) para simplificar o restante do código.
+    if tem_family:
+        fn = (resultado.get("novo_family_name") or "").strip()
+        if len(fn) > 55:
+            print(f"   🛡️  family_name Gemini tem {len(fn)} chars — truncando para 55.")
+            fn = fn[:55].rsplit(" ", 1)[0]
+        resultado["novo_family_name"] = fn
+        # title pode ser vazio — o Meli gera a partir do family_name
+        resultado.setdefault("novo_titulo", fn)
+        print(f"   ✓ Novo family_name: {fn}")
+    else:
+        novo_titulo = (resultado.get("novo_titulo") or "").strip()
+        if len(novo_titulo) > 60:
+            print(f"   🛡️  Título Gemini tem {len(novo_titulo)} chars — truncando para 60.")
+            novo_titulo = novo_titulo[:60].rsplit(" ", 1)[0]
         resultado["novo_titulo"] = novo_titulo
+        resultado["novo_family_name"] = ""
+        print(f"   ✓ Novo título: {novo_titulo}")
 
-    print(f"   ✓ Novo título: {resultado['novo_titulo']}")
     print(f"   ✓ Novo preço: R$ {resultado['novo_preco']}")
     print(f"   ✓ Nova descrição: {len(resultado.get('nova_descricao', ''))} chars")
     print(f"   ✓ Atributos otimizados: {len(resultado.get('novos_atributos', []))}")
@@ -394,7 +427,7 @@ def montar_payload_post(base: dict, otimizacao: dict) -> dict:
     attrs_final = list(attrs_por_id.values())
 
     payload: dict = {
-        "title": otimizacao["novo_titulo"],
+        "title": otimizacao.get("novo_titulo") or otimizacao.get("novo_family_name", ""),
         "category_id": base["category_id"],
         "price": otimizacao["novo_preco"],
         "currency_id": base["currency_id"],
@@ -405,6 +438,18 @@ def montar_payload_post(base: dict, otimizacao: dict) -> dict:
         "pictures": base["pictures"],
         "attributes": attrs_final,
     }
+
+    # family_name: obrigatório em categorias de catálogo/moda.
+    # O Meli compõe o título como family_name + sufixo de variação.
+    # Sem family_name → HTTP 400 body.required_fields.
+    novo_fn = (otimizacao.get("novo_family_name") or "").strip()
+    if novo_fn:
+        payload["family_name"] = novo_fn
+        print(f"   ✓ family_name: {novo_fn}")
+    elif base.get("family_name"):
+        # Gemini não retornou — usa o original como fallback seguro.
+        payload["family_name"] = base["family_name"]
+        print(f"   ✓ family_name (original): {base['family_name']}")
 
     # Variações: repassa fielmente do original (crítico em moda)
     if base["variations"]:
