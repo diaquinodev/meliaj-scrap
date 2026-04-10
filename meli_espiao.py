@@ -4,6 +4,10 @@
 ║  Busca os 15 primeiros resultados para um termo e pede ao Gemini um          ║
 ║  relatório de inteligência de mercado (preço médio, palavras vencedoras      ║
 ║  e estratégia de ataque).                                                    ║
+║                                                                              ║
+║  Fluxo de busca (com fallback automático):                                   ║
+║    1. Tenta GET /sites/MLB/search?q= (API oficial)                           ║
+║    2. Se 403 → scraping do site público via Playwright                       ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -11,6 +15,7 @@ import argparse
 import json
 import re
 import sys
+import urllib.parse
 from collections import Counter
 
 import requests
@@ -39,20 +44,20 @@ STOPWORDS = {
     "ao", "aos", "às", "à", "pra", "pro", "ou", "mais", "ate", "até",
 }
 
+# Regex para extrair MLB ID de permalinks do Meli.
+_MLB_FROM_URL = re.compile(r"(MLB[\-]?\d+)", re.IGNORECASE)
+
 
 class MeliSearchForbiddenError(RuntimeError):
     """Levantada quando /sites/MLB/search responde 403."""
 
 
-# ─── BUSCA PÚBLICA NO MELI ───────────────────────────────────────────────────
-def buscar_concorrentes(termo: str, access_token: str, limit: int = SEARCH_LIMIT) -> list:
+# ─── BUSCA VIA API OFICIAL ──────────────────────────────────────────────────
+def buscar_concorrentes_api(termo: str, access_token: str, limit: int = SEARCH_LIMIT) -> list:
     """
     GET /sites/MLB/search?q={termo}&limit=N
     Retorna a lista crua de 'results' (top N). Levanta TokenExpiredError
-    em 401 para o main cuidar do refresh. Levanta MeliSearchForbiddenError
-    em 403 — esse endpoint foi restringido pelo Meli para apps sem
-    credencial de parceiro, e a exceção específica deixa o main dar uma
-    mensagem acionável.
+    em 401, MeliSearchForbiddenError em 403.
     """
     url = f"{ML_BASE_URL}/sites/MLB/search"
     params = {"q": termo, "limit": limit}
@@ -67,8 +72,7 @@ def buscar_concorrentes(termo: str, access_token: str, limit: int = SEARCH_LIMIT
         raise TokenExpiredError("Token expirado ao consultar /sites/MLB/search.")
     if res.status_code == 403:
         raise MeliSearchForbiddenError(
-            f"/sites/MLB/search devolveu HTTP 403 para '{termo}'. "
-            f"Body: {res.text[:200]}"
+            f"/sites/MLB/search devolveu HTTP 403 para '{termo}'."
         )
     if res.status_code != 200:
         raise RuntimeError(
@@ -84,8 +88,8 @@ def buscar_concorrentes(termo: str, access_token: str, limit: int = SEARCH_LIMIT
     return data.get("results") or []
 
 
-def extrair_concorrentes(results: list) -> list:
-    """Normaliza os campos que interessam: id, title, price, seller, permalink."""
+def extrair_concorrentes_api(results: list) -> list:
+    """Normaliza os campos de uma resposta da API."""
     concorrentes = []
     for r in results:
         if not isinstance(r, dict):
@@ -100,6 +104,141 @@ def extrair_concorrentes(results: list) -> list:
                 "permalink": r.get("permalink") or "",
             }
         )
+    return concorrentes
+
+
+# ─── BUSCA VIA SCRAPING (FALLBACK PLAYWRIGHT) ──────────────────────────────
+def _parse_preco(texto: str) -> float | None:
+    """Converte texto de preço brasileiro ('1.299,90') em float."""
+    texto = (texto or "").strip()
+    if not texto:
+        return None
+    # Remove "R$", espaços, pontos de milhar; troca vírgula por ponto.
+    limpo = texto.replace("R$", "").replace("\xa0", "").strip()
+    limpo = limpo.replace(".", "").replace(",", ".")
+    try:
+        return float(limpo)
+    except ValueError:
+        return None
+
+
+def buscar_concorrentes_scraping(termo: str, limit: int = SEARCH_LIMIT) -> list:
+    """
+    Fallback quando a API devolve 403: abre o site público do Mercado Livre
+    com Playwright (headless Chromium) e extrai os primeiros resultados.
+    Requer: pip install playwright && python -m playwright install chromium
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print(
+            "❌ Playwright não está instalado. Rode:\n"
+            "   pip install playwright && python -m playwright install chromium"
+        )
+        sys.exit(1)
+
+    slug = urllib.parse.quote_plus(termo)
+    url = f"https://lista.mercadolivre.com.br/{slug}"
+    print(f"🌐 Abrindo Playwright (headless) → {url}")
+
+    concorrentes: list[dict] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"],
+        )
+        ctx = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 900},
+            locale="pt-BR",
+        )
+        page = ctx.new_page()
+
+        try:
+            page.goto(url, timeout=45000, wait_until="domcontentloaded")
+        except Exception as e:
+            browser.close()
+            raise RuntimeError(
+                f"Playwright não conseguiu abrir a página de busca: {e}"
+            ) from e
+
+        # Espera os cards renderizarem (JS do Meli).
+        page.wait_for_timeout(4000)
+
+        # Estratégia 1: cards poly-card (layout 2024-2025).
+        cards = page.query_selector_all(
+            "li.ui-search-layout__item, div.poly-card, "
+            "li[class*='ui-search-layout__item']"
+        )
+        if not cards:
+            # Estratégia 2: qualquer <a> com href contendo /MLB (menos preciso).
+            cards = page.query_selector_all("a[href*='/MLB']")
+
+        for card in cards[:limit]:
+            item: dict = {
+                "id": None,
+                "title": "",
+                "price": None,
+                "seller_nickname": "N/A",
+                "permalink": "",
+            }
+
+            # ── Título e permalink ────────────────────────────────────
+            link_el = card.query_selector(
+                "a[class*='poly-component__title'], "
+                "a[class*='ui-search-item__group__element'], "
+                "a[class*='ui-search-link'], "
+                "h2 a, a[href*='/MLB']"
+            )
+            if link_el:
+                item["title"] = (link_el.inner_text() or "").strip()
+                href = link_el.get_attribute("href") or ""
+                item["permalink"] = href.split("?")[0]  # limpa tracking
+            elif card.tag_name == "a":
+                item["title"] = (card.inner_text() or "").strip()[:120]
+                href = card.get_attribute("href") or ""
+                item["permalink"] = href.split("?")[0]
+
+            # ── MLB ID a partir do permalink ──────────────────────────
+            m = _MLB_FROM_URL.search(item["permalink"])
+            if m:
+                item["id"] = m.group(1).replace("-", "")
+            elif not item["title"]:
+                continue  # card vazio, pula
+
+            # ── Preço ─────────────────────────────────────────────────
+            price_el = card.query_selector(
+                "span[class*='andes-money-amount__fraction'], "
+                "span[class*='price-tag-fraction'], "
+                "span.price-tag-amount"
+            )
+            if price_el:
+                preco_int = (price_el.inner_text() or "").strip()
+                cents_el = card.query_selector(
+                    "span[class*='andes-money-amount__cents']"
+                )
+                cents = (cents_el.inner_text() or "").strip() if cents_el else ""
+                preco_str = f"{preco_int},{cents}" if cents else preco_int
+                item["price"] = _parse_preco(preco_str)
+
+            # ── Vendedor ──────────────────────────────────────────────
+            seller_el = card.query_selector(
+                "span[class*='poly-component__seller'], "
+                "p[class*='ui-search-official-store'], "
+                "span[class*='ui-search-item__brand']"
+            )
+            if seller_el:
+                item["seller_nickname"] = (seller_el.inner_text() or "N/A").strip()
+
+            if item["title"]:
+                concorrentes.append(item)
+
+        browser.close()
+
     return concorrentes
 
 
@@ -261,10 +400,15 @@ def imprimir_relatorio(
     top_palavras_py: list,
     laudo: dict,
 ) -> None:
+    # Detecta se os dados vieram da API (têm seller real) ou scraping.
+    # Não é 100% infalível, mas suficiente para o header.
+    fonte = "API" if all(c.get("seller_nickname") not in (None, "N/A") for c in concorrentes[:3]) else "Scraping (Playwright)"
+
     print("\n" + "=" * 72)
     print("🕵️  ESPIÃO DE CONCORRÊNCIA — AJ MODA")
     print("=" * 72)
     print(f"🔎 Termo       : {termo}")
+    print(f"📡 Fonte       : {fonte}")
     print(f"📦 Analisados  : {len(concorrentes)} anúncios (top {SEARCH_LIMIT} do Meli)")
     print(f"💰 Preço médio : {_fmt_brl(preco_medio_py)} (cálculo Python)")
     print(f"🔑 Top palavras: {', '.join(top_palavras_py) or '(nenhuma)'} (Python)")
@@ -293,6 +437,35 @@ def imprimir_relatorio(
     print(laudo.get("estrategia_ataque") or "(nenhuma)")
     print("-" * 72)
     print("\n✅ Espionagem concluída.")
+
+
+# ─── ORQUESTRAÇÃO DE BUSCA (API → SCRAPING) ─────────────────────────────────
+def buscar_concorrentes(termo: str, access_token: str) -> list:
+    """
+    Tenta a API oficial primeiro. Se 403, faz fallback automático para
+    scraping com Playwright. Retorna lista já normalizada de dicts.
+    """
+    # ── Tentativa 1: API oficial ──────────────────────────────────────
+    try:
+        print("   📡 Tentando API oficial /sites/MLB/search...")
+        results = buscar_concorrentes_api(termo, access_token)
+        concorrentes = extrair_concorrentes_api(results)
+        if concorrentes:
+            print(f"   ✓ API retornou {len(concorrentes)} resultados.")
+            return concorrentes
+    except MeliSearchForbiddenError:
+        print(
+            "   ⚠️  API devolveu HTTP 403 — endpoint restrito para apps "
+            "sem credencial de parceiro."
+        )
+    # TokenExpiredError não é tratado aqui — borbulha para o main.
+
+    # ── Tentativa 2: scraping via Playwright ──────────────────────────
+    print("   🔄 Ativando fallback: scraping do site público via Playwright...")
+    concorrentes = buscar_concorrentes_scraping(termo, limit=SEARCH_LIMIT)
+    if concorrentes:
+        print(f"   ✓ Scraping capturou {len(concorrentes)} resultados.")
+    return concorrentes
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -324,7 +497,7 @@ if __name__ == "__main__":
 
     print(f"\n🔎 Buscando '{termo}' no Mercado Livre (top {SEARCH_LIMIT})...")
     try:
-        results = buscar_concorrentes(termo, access_token)
+        concorrentes = buscar_concorrentes(termo, access_token)
     except TokenExpiredError:
         refresh_token = tokens.get("refresh_token")
         if not refresh_token:
@@ -333,57 +506,20 @@ if __name__ == "__main__":
         try:
             tokens = refresh_access_token(refresh_token)
             access_token = tokens["access_token"]
-            results = buscar_concorrentes(termo, access_token)
-        except MeliSearchForbiddenError as e:
-            print("\n" + "=" * 72)
-            print("❌ ENDPOINT /sites/MLB/search BLOQUEADO (HTTP 403)")
-            print("=" * 72)
-            print(f"Detalhe: {e}")
-            print(
-                "\nO Mercado Livre restringiu a busca pública por termo (q=) "
-                "para apps sem credencial de parceiro. Mesmo enviando o "
-                "access_token válido da AJ Moda, todas as variações do "
-                "endpoint (q, category, domain_id, seller_id) devolvem 403."
-            )
-            print(
-                "\nCaminhos possíveis:\n"
-                "  1. Registrar o app AJ Moda como parceiro Meli e pedir "
-                "acesso ao /sites/MLB/search.\n"
-                "  2. Usar o Mercado Livre Ads API, se disponível no seu plano.\n"
-                "  3. Extrair os concorrentes via scraping do site público "
-                "(playwright — você já tem instalado)."
-            )
-            sys.exit(2)
+            concorrentes = buscar_concorrentes(termo, access_token)
         except (RuntimeError, TokenExpiredError) as e:
             print(f"❌ {e}")
             sys.exit(1)
-    except MeliSearchForbiddenError as e:
-        print("\n" + "=" * 72)
-        print("❌ ENDPOINT /sites/MLB/search BLOQUEADO (HTTP 403)")
-        print("=" * 72)
-        print(f"Detalhe: {e}")
-        print(
-            "\nO Mercado Livre restringiu a busca pública por termo (q=) "
-            "para apps sem credencial de parceiro. Mesmo enviando o "
-            "access_token válido da AJ Moda, todas as variações do "
-            "endpoint (q, category, domain_id, seller_id) devolvem 403."
-        )
-        print(
-            "\nCaminhos possíveis:\n"
-            "  1. Registrar o app AJ Moda como parceiro Meli e pedir "
-            "acesso ao /sites/MLB/search.\n"
-            "  2. Usar o Mercado Livre Ads API, se disponível no seu plano.\n"
-            "  3. Extrair os concorrentes via scraping do site público "
-            "(playwright — você já tem instalado)."
-        )
-        sys.exit(2)
     except RuntimeError as e:
         print(f"❌ {e}")
         sys.exit(1)
 
-    concorrentes = extrair_concorrentes(results)
     if not concorrentes:
-        print("❌ Nenhum resultado retornado para esse termo.")
+        print(
+            "❌ Nenhum resultado encontrado (nem via API, nem via scraping).\n"
+            "   Verifique se o Playwright está instalado:\n"
+            "     pip install playwright && python -m playwright install chromium"
+        )
         sys.exit(1)
 
     print(f"✅ {len(concorrentes)} concorrentes capturados.")
