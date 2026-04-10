@@ -375,10 +375,10 @@ def get_ml_data(mlb: str, access_token: str) -> dict:
 
 
 # ─── ENDPOINTS EXTRAS DO MERCADO LIVRE ───────────────────────────────────────
-def get_visits_30d(mlb: str, headers: dict) -> int | None:
-    """Total de visitas nos últimos 30 dias."""
+def get_visits(mlb: str, headers: dict, days: int = 15) -> int | None:
+    """Total de visitas nos últimos N dias (padrão: 15)."""
     status, data = _get_json(
-        f"{ML_BASE_URL}/items/{mlb}/visits/time_window?last=30&unit=day", headers
+        f"{ML_BASE_URL}/items/{mlb}/visits/time_window?last={days}&unit=day", headers
     )
     if status != 200 or not isinstance(data, dict):
         return None
@@ -388,7 +388,7 @@ def get_visits_30d(mlb: str, headers: dict) -> int | None:
     return data.get("total_visits")
 
 
-def get_recent_sales(mlb: str, seller_id, headers: dict, days: int = 30) -> int | None:
+def get_recent_sales(mlb: str, seller_id, headers: dict, days: int = 15) -> int | None:
     """Quantidade de pedidos pagos para este item nos últimos N dias."""
     if not seller_id:
         return None
@@ -407,7 +407,7 @@ def get_recent_sales(mlb: str, seller_id, headers: dict, days: int = 30) -> int 
     return (data.get("paging") or {}).get("total")
 
 
-def get_questions(mlb: str, headers: dict, limit: int = 15) -> list:
+def get_questions(mlb: str, headers: dict, limit: int = 20) -> list:
     """Perguntas recentes do anúncio."""
     status, data = _get_json(
         f"{ML_BASE_URL}/questions/search?item={mlb}&limit={limit}", headers
@@ -415,6 +415,14 @@ def get_questions(mlb: str, headers: dict, limit: int = 15) -> list:
     if status != 200 or not isinstance(data, dict):
         return []
     return data.get("questions") or []
+
+
+def contar_perguntas_sem_resposta(perguntas: list) -> int:
+    """Conta quantas perguntas não têm resposta (status != ANSWERED)."""
+    return sum(
+        1 for q in perguntas
+        if isinstance(q, dict) and q.get("status") != "ANSWERED"
+    )
 
 
 def get_reviews(mlb: str, headers: dict) -> dict:
@@ -531,24 +539,27 @@ def filtrar_atributos_candidatos(
 
 
 def coletar_dados_extras(dados: dict, access_token: str) -> dict:
-    """Enriquecimento: visitas, vendas, perguntas, reviews, moderações, reputação."""
+    """Enriquecimento com foco em janela de 15 dias + métricas de qualidade."""
     headers = {"Authorization": f"Bearer {access_token}"}
     mlb = dados["id"]
+    DIAS = 15
 
-    print("\n📡 Coletando métricas e contexto extra:")
+    print(f"\n📡 Coletando métricas (janela de {DIAS} dias) e contexto:")
 
-    visits_30d = get_visits_30d(mlb, headers)
-    print(f"   • /visits (30d)      {'✓ '+str(visits_30d) if visits_30d is not None else '⚠ indisponível'}")
+    visits = get_visits(mlb, headers, days=DIAS)
+    print(f"   • /visits ({DIAS}d)     {'✓ '+str(visits) if visits is not None else '⚠ indisponível'}")
 
-    sales_30d = get_recent_sales(mlb, dados.get("seller_id"), headers)
-    print(f"   • /orders (30d)      {'✓ '+str(sales_30d) if sales_30d is not None else '⚠ indisponível'}")
+    sales = get_recent_sales(mlb, dados.get("seller_id"), headers, days=DIAS)
+    print(f"   • /orders ({DIAS}d)     {'✓ '+str(sales) if sales is not None else '⚠ indisponível'}")
 
     perguntas = get_questions(mlb, headers)
-    print(f"   • /questions         {'✓ '+str(len(perguntas)) if perguntas else '⚠ 0'}")
+    sem_resposta = contar_perguntas_sem_resposta(perguntas)
+    print(f"   • /questions         ✓ {len(perguntas)} total | {sem_resposta} sem resposta")
 
     reviews = get_reviews(mlb, headers)
     nota_reviews = (reviews or {}).get("rating_average")
-    print(f"   • /reviews           {'✓ '+str(nota_reviews) if nota_reviews else '⚠ sem reviews'}")
+    total_reviews_count = (reviews or {}).get("paging", {}).get("total", 0)
+    print(f"   • /reviews           {'✓ nota '+str(nota_reviews)+' ('+str(total_reviews_count)+' reviews)' if nota_reviews else '⚠ sem reviews'}")
 
     moderations = get_moderations(mlb, headers)
     print(f"   • /moderations       {'✓ '+str(len(moderations)) if moderations else '⚠ 0 ou negado'}")
@@ -560,16 +571,19 @@ def coletar_dados_extras(dados: dict, access_token: str) -> dict:
     candidatos = filtrar_atributos_candidatos(category_attrs, dados.get("atributos", []))
     print(f"   • /categories/attrs  {'✓ '+str(len(candidatos))+' candidatos' if candidatos else '⚠'}")
 
-    # Conversão: sold_30d / visits_30d
+    # Conversão 15 dias: sold / visits
     conversao = None
-    if visits_30d and visits_30d > 0 and sales_30d is not None:
-        conversao = round((sales_30d / visits_30d) * 100, 2)
+    if visits and visits > 0 and sales is not None:
+        conversao = round((sales / visits) * 100, 2)
 
-    dados["visits_30d"] = visits_30d
-    dados["sales_30d"] = sales_30d
-    dados["conversao_30d_pct"] = conversao
+    dados["visits_15d"] = visits
+    dados["sales_15d"] = sales
+    dados["conversao_15d_pct"] = conversao
     dados["perguntas"] = perguntas
+    dados["perguntas_sem_resposta"] = sem_resposta
     dados["reviews"] = reviews
+    dados["nota_reviews"] = nota_reviews
+    dados["total_reviews"] = total_reviews_count
     dados["moderations"] = moderations
     dados["seller_info"] = seller
     dados["atributos_candidatos"] = candidatos
@@ -636,26 +650,26 @@ def detectar_red_flags(dados: dict) -> list:
 
 # ─── AUDITORIA COM GEMINI (google-genai) ─────────────────────────────────────
 def auditar_com_gemini(dados_ml: dict) -> dict:
-    print("🧠 Injetando dados no Gemini (google-genai) para auditoria de conversão...")
+    print("🧠 Injetando dados no Gemini — modo Diretor de Growth (janela 15 dias)...")
 
     api_key = load_gemini_api_key()
     client = genai.Client(api_key=api_key)
 
     perguntas_resumo = [
-        {"pergunta": q.get("text", "")[:300]}
+        {
+            "pergunta": q.get("text", "")[:300],
+            "status": q.get("status", ""),
+        }
         for q in (dados_ml.get("perguntas") or [])[:10]
         if q.get("text")
     ]
-    reviews_data = dados_ml.get("reviews") or {}
-    rating_avg = reviews_data.get("rating_average")
-    total_reviews = reviews_data.get("rating_levels", {}) if isinstance(reviews_data.get("rating_levels"), dict) else {}
 
     prompt = f"""
-Analise os dados abaixo deste ANÚNCIO do Mercado Livre e produza um laudo
-de diagnóstico com foco em CONVERSÃO, REGRAS DO MELI e SEO para MODA.
+Analise os dados abaixo deste ANÚNCIO do Mercado Livre e produza um
+PLANO DE GROWTH com foco no funil Visitas → Vendas dos últimos 15 dias.
 
 === DADOS BÁSICOS DO ANÚNCIO ===
-- ID do Anúncio: {dados_ml['id']}
+- ID: {dados_ml['id']}
 - Título: {dados_ml['titulo']}
 - Preço: {dados_ml['moeda']} {dados_ml['preco']}
 - Status: {dados_ml['status']}  | Sub-status: {dados_ml.get('sub_status')}
@@ -664,21 +678,24 @@ de diagnóstico com foco em CONVERSÃO, REGRAS DO MELI e SEO para MODA.
 - Condição: {dados_ml['condicao']}
 - Estoque disponível: {dados_ml['estoque']}
 - Vendas totais históricas: {dados_ml.get('vendidos_total', 0)}
-- Nível de Saúde (Meli): {dados_ml['saude']}
-- Tags internas (Meli): {dados_ml['tags']}
-- Ações corretivas exigidas pelo Meli: {dados_ml['acoes_saude']}
+- Saúde (Meli): {dados_ml['saude']}
+- Tags internas: {dados_ml['tags']}
+- Ações corretivas do Meli: {dados_ml['acoes_saude']}
 
-=== PERFORMANCE (30 DIAS) ===
-- Visitas: {dados_ml.get('visits_30d', 'N/A')}
-- Vendas: {dados_ml.get('sales_30d', 'N/A')}
-- Taxa de conversão: {dados_ml.get('conversao_30d_pct', 'N/A')}%
+=== FUNIL DE 15 DIAS ===
+- Visitas (15d): {dados_ml.get('visits_15d', 'N/A')}
+- Vendas (15d): {dados_ml.get('sales_15d', 'N/A')}
+- Taxa de conversão (15d): {dados_ml.get('conversao_15d_pct', 'N/A')}%
+
+=== MÉTRICAS DE QUALIDADE ===
+- Perguntas: {len(dados_ml.get('perguntas') or [])} total | {dados_ml.get('perguntas_sem_resposta', 0)} sem resposta
+- Nota média de reviews: {dados_ml.get('nota_reviews') or 'sem reviews'}
+- Total de reviews: {dados_ml.get('total_reviews', 0)}
+- Moderações/infrações: {len(dados_ml.get('moderations') or [])}
 
 === RAIO-X TABELA DE MEDIDAS ===
-- tem_tabela_medidas (SIZE_GRID_ID presente): {dados_ml.get('tem_tabela_medidas', False)}
-- SIZE_GRID_ID atual: {dados_ml.get('size_grid_id') or '(nenhum)'}
-Se False, ATIVE a regra de tabela de medidas do system_instruction: alerte
-em pontos_criticos e recomende em acoes_saude_recomendadas criar/vincular
-uma Tabela de Medidas no Mercado Livre (crítico em moda).
+- tem_tabela_medidas: {dados_ml.get('tem_tabela_medidas', False)}
+- SIZE_GRID_ID: {dados_ml.get('size_grid_id') or '(nenhum)'}
 
 === DESCRIÇÃO ATUAL ===
 {dados_ml['descricao']}
@@ -686,67 +703,44 @@ uma Tabela de Medidas no Mercado Livre (crítico em moda).
 === ATRIBUTOS JÁ PREENCHIDOS ===
 {json.dumps(dados_ml['atributos'], ensure_ascii=False)}
 
-=== ATRIBUTOS_DISPONIVEIS_NA_CATEGORIA (ainda não preenchidos) ===
-Estes são os IDs EXATOS aceitos pela categoria {dados_ml['categoria']}.
+=== ATRIBUTOS_DISPONIVEIS_NA_CATEGORIA ===
+IDs EXATOS da categoria {dados_ml['categoria']}.
 Use APENAS estes IDs em "atributos_sugeridos". NÃO invente IDs.
-Quando um atributo tem "allowed_values", escolha APENAS um valor da lista.
+Quando tem "allowed_values", escolha da lista.
 {json.dumps(dados_ml.get('atributos_candidatos', []), ensure_ascii=False)}
 
-=== PERGUNTAS RECENTES DOS COMPRADORES ===
+=== PERGUNTAS RECENTES (com status) ===
 {json.dumps(perguntas_resumo, ensure_ascii=False)}
 
-=== REVIEWS ===
-Nota média: {rating_avg} | Distribuição: {total_reviews}
-
 INSTRUÇÕES CRÍTICAS:
-1. NUNCA, em NENHUMA hipótese, sugira os atributos:
-   - GTIN, EAN, UPC, ISBN — códigos de identificação com formato
-     rígido numérico que quebram o PUT /items com HTTP 400 se
-     preenchidos com texto livre.
-   - COLOR, SIZE, MAIN_COLOR — são atributos de GRADE DE VARIAÇÃO e
-     vivem em variation.attribute_combinations, não em item.attributes.
-     Enviá-los no nível raiz causa "Same attributes are used in more
-     than of item.attributes, variation.attribute_combinations".
-   Se qualquer desses aparecer na lista ATRIBUTOS_DISPONIVEIS_NA_CATEGORIA,
-   IGNORE-OS completamente.
-2. Para cada atributo de moda que puder ser preenchido, use EXATAMENTE o
-   "id" da lista ATRIBUTOS_DISPONIVEIS_NA_CATEGORIA. Não invente IDs nem
-   use nomes em português como ID.
-3. Avalie se o título está otimizado: até 60 caracteres, palavra-chave no
-   início, sem caps-lock, sem ícones proibidos. Analise o que as perguntas
-   dos compradores revelam sobre dúvidas que o título/descrição não cobrem.
-4. Analise a saúde, tags, sub_status e ações do Meli, traduzindo em ações
-   práticas. Se a taxa de conversão for baixa, recomende ações específicas.
-5. Na "descricao_otimizada", aplique AIDA, com quebras de linha e sem
-   emojis proibidos. ANTECIPE e responda as dúvidas que apareceram nas
-   perguntas recentes dos compradores.
-6. Em "respostas_perguntas_frequentes", para cada pergunta recente sugira
-   uma resposta curta e persuasiva.
+1. NUNCA sugira GTIN, EAN, UPC, ISBN, COLOR, SIZE, MAIN_COLOR.
+2. Use APENAS IDs da lista ATRIBUTOS_DISPONIVEIS_NA_CATEGORIA.
+3. O "plano_de_acao_15_dias" deve ter EXATAMENTE 5 passos sequenciais,
+   cada um com "dia" (ex.: "Dia 1-2"), "acao" (frase curta) e "detalhe"
+   (o que fazer concretamente com título, fotos, preço ou descrição).
+   Baseie-se na taxa de conversão do funil — se ela está abaixo de 1%,
+   priorize ações de CTR (título/fotos); se está entre 1-3%, priorize
+   preço/descrição; se está acima de 3%, foque em escala (estoque/ads).
+4. Se tem perguntas sem resposta, alerte em pontos_criticos.
+5. Se tem_tabela_medidas é False, alerte e recomende criar.
+6. MODEL deve ser reescrito no formato [Tipo]+[Material]+[Ocasião].
 7. Responda EXCLUSIVAMENTE com JSON válido no schema pedido.
 """.strip()
 
     system_instruction = (
-        "Você é um auditor sênior de Mercado Livre e especialista em SEO e "
-        "ranqueamento para e-commerce de moda (AJ Moda). Responda sempre em "
-        "português do Brasil, de forma objetiva, prática e acionável.\n\n"
+        "Você é o Diretor de Growth da AJ Moda, e-commerce de moda feminina "
+        "no Mercado Livre. Seu papel é analisar o funil de conversão dos "
+        "últimos 15 dias e produzir um plano de ação tático e data-driven.\n\n"
+        "Responda em português do Brasil, de forma objetiva e acionável.\n\n"
         "REGRA DE SEO - ATRIBUTO MODEL (OBRIGATÓRIA):\n"
-        "Sempre que o atributo MODEL aparecer em ATRIBUTOS_DISPONIVEIS_NA_CATEGORIA "
-        "(mesmo que já esteja preenchido e marcado com 'override_with_seo_hack'), "
-        "você DEVE incluí-lo em 'atributos_sugeridos' reescrevendo seu valor no "
-        "formato exato:\n"
+        "Sempre que MODEL aparecer em ATRIBUTOS_DISPONIVEIS_NA_CATEGORIA "
+        "(mesmo já preenchido), reescreva no formato:\n"
         "    [Tipo] + [Material] + [Ocasião]\n"
-        "Exemplos válidos: 'Chamise Linho Casual', 'Blazer Alfaiataria Trabalho', "
-        "'Vestido Midi Viscose Festa', 'Camisa Tricoline Social'.\n"
-        "Regras do MODEL: máximo de 4 palavras, sem vírgulas, sem travessões, "
-        "sem palavras genéricas como 'moda' ou 'feminino', use substantivos "
-        "concretos que compradores digitam na busca. Isso é um HACK DE SEO "
-        "e DEVE sobrescrever o valor atual, nunca repita o valor antigo.\n\n"
+        "Exemplos: 'Chamise Linho Casual', 'Blazer Alfaiataria Trabalho'.\n"
+        "Máx 4 palavras, sem vírgulas, sem 'moda'/'feminino'. HACK DE SEO.\n\n"
         "REGRA DE TABELA DE MEDIDAS:\n"
-        "Quando 'tem_tabela_medidas' for False/null, inclua em 'pontos_criticos' "
-        "um alerta sobre a AUSÊNCIA DE TABELA DE MEDIDAS (SIZE_GRID_ID) e adicione "
-        "em 'acoes_saude_recomendadas' uma recomendação explícita para criar/vincular "
-        "uma tabela de medidas via Mercado Livre — isso é crítico em moda, reduz "
-        "devoluções e melhora a conversão."
+        "Se tem_tabela_medidas=False, alerte em pontos_criticos e recomende "
+        "criar/vincular tabela de medidas — crítico em moda."
     )
 
     response_schema = {
@@ -754,7 +748,14 @@ INSTRUÇÕES CRÍTICAS:
         "properties": {
             "nota_geral": {
                 "type": "number",
-                "description": "Nota de 0 a 10 da qualidade geral do anúncio.",
+                "description": "Nota de 0 a 10 da saúde do funil de conversão.",
+            },
+            "diagnostico_funil": {
+                "type": "string",
+                "description": (
+                    "Parágrafo curto (3-4 frases) interpretando o funil "
+                    "Visitas→Vendas dos 15 dias: onde está o gargalo?"
+                ),
             },
             "titulo_otimizado": {
                 "type": "string",
@@ -767,6 +768,28 @@ INSTRUÇÕES CRÍTICAS:
             "pontos_criticos": {
                 "type": "array",
                 "items": {"type": "string"},
+            },
+            "plano_de_acao_15_dias": {
+                "type": "array",
+                "description": "5 passos sequenciais para os próximos 15 dias.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "dia": {
+                            "type": "string",
+                            "description": "Janela temporal (ex: 'Dia 1-2').",
+                        },
+                        "acao": {
+                            "type": "string",
+                            "description": "Ação curta (ex: 'Reescrever título').",
+                        },
+                        "detalhe": {
+                            "type": "string",
+                            "description": "O que fazer concretamente.",
+                        },
+                    },
+                    "required": ["dia", "acao", "detalhe"],
+                },
             },
             "atributos_sugeridos": {
                 "type": "array",
@@ -793,11 +816,6 @@ INSTRUÇÕES CRÍTICAS:
                     "required": ["id", "value_name", "nome_humano"],
                 },
             },
-            "acoes_saude_recomendadas": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Tradução prática das ações exigidas pelo Meli.",
-            },
             "descricao_otimizada": {
                 "type": "string",
                 "description": "Nova descrição completa aplicando AIDA.",
@@ -817,11 +835,12 @@ INSTRUÇÕES CRÍTICAS:
         },
         "required": [
             "nota_geral",
+            "diagnostico_funil",
             "titulo_otimizado",
             "pontos_positivos",
             "pontos_criticos",
+            "plano_de_acao_15_dias",
             "atributos_sugeridos",
-            "acoes_saude_recomendadas",
             "descricao_otimizada",
             "respostas_perguntas_frequentes",
         ],
@@ -858,7 +877,7 @@ INSTRUÇÕES CRÍTICAS:
 # ─── IMPRESSÃO DO LAUDO ──────────────────────────────────────────────────────
 def imprimir_laudo(laudo: dict, dados_ml: dict, red_flags: list) -> None:
     print("\n" + "=" * 64)
-    print("📊 LAUDO DE QUALIDADE - AJ MODA AUDITOR")
+    print("📊 LAUDO DE GROWTH - AJ MODA ESTRATEGISTA")
     print("=" * 64)
     print(f"🆔 Anúncio : {dados_ml['id']}")
     print(f"📌 Título  : {dados_ml['titulo']}")
@@ -870,32 +889,48 @@ def imprimir_laudo(laudo: dict, dados_ml: dict, red_flags: list) -> None:
     else:
         print(f"🌡️  Saúde  : {saude}")
 
-    # Métricas de 30d
-    v = dados_ml.get("visits_30d")
-    s = dados_ml.get("sales_30d")
-    c = dados_ml.get("conversao_30d_pct")
-    print(f"📈 30 dias : visitas={v if v is not None else 'N/A'} | "
+    # Funil de 15 dias
+    v = dados_ml.get("visits_15d")
+    s = dados_ml.get("sales_15d")
+    c = dados_ml.get("conversao_15d_pct")
+    print(f"📈 15 dias : visitas={v if v is not None else 'N/A'} | "
           f"vendas={s if s is not None else 'N/A'} | "
           f"conversão={c if c is not None else 'N/A'}%")
 
-    # Raio-X de Tabela de Medidas
+    # Métricas de qualidade
+    sem_resp = dados_ml.get("perguntas_sem_resposta", 0)
+    total_perguntas = len(dados_ml.get("perguntas") or [])
+    nota_rev = dados_ml.get("nota_reviews")
+    total_rev = dados_ml.get("total_reviews", 0)
+    print(f"💬 Perguntas: {total_perguntas} total | {sem_resp} sem resposta"
+          + (" ⚠️" if sem_resp > 0 else ""))
+    print(f"⭐ Reviews : nota {nota_rev or 'N/A'} ({total_rev} reviews)")
+
+    # Tabela de Medidas
     tem_grid = dados_ml.get("tem_tabela_medidas")
     grid_id = dados_ml.get("size_grid_id")
     if tem_grid:
-        print(f"📏 Tabela de Medidas: ✓ presente (SIZE_GRID_ID={grid_id})")
+        print(f"📏 Tabela  : ✓ presente (SIZE_GRID_ID={grid_id})")
     else:
-        print("📏 Tabela de Medidas: ✗ AUSENTE — crítico em moda (SIZE_GRID_ID vazio)")
+        print("📏 Tabela  : ✗ AUSENTE — crítico em moda")
 
     # Red flags
-    print("\n🚨 RED FLAGS DETECTADOS NO BACKEND:")
+    print("\n🚨 RED FLAGS:")
     if not red_flags:
         print("  (nenhum)")
     else:
         for categoria, msg in red_flags:
             print(f"  [{categoria}] {msg}")
 
-    print(f"\n⭐ NOTA DE CONVERSÃO (Gemini): {laudo.get('nota_geral')}/10")
-    print(f"\n✏️  TÍTULO OTIMIZADO SUGERIDO:\n   {laudo.get('titulo_otimizado')}")
+    print(f"\n⭐ NOTA DO FUNIL (Gemini): {laudo.get('nota_geral')}/10")
+
+    # Diagnóstico do funil
+    diag = laudo.get("diagnostico_funil")
+    if diag:
+        print(f"\n🔬 DIAGNÓSTICO DO FUNIL:")
+        print(f"   {diag}")
+
+    print(f"\n✏️  TÍTULO OTIMIZADO:\n   {laudo.get('titulo_otimizado')}")
 
     print("\n✅ PONTOS FORTES:")
     for p in laudo.get("pontos_positivos") or ["(nenhum)"]:
@@ -905,7 +940,20 @@ def imprimir_laudo(laudo: dict, dados_ml: dict, red_flags: list) -> None:
     for cp in laudo.get("pontos_criticos") or ["(nenhum)"]:
         print(f"  [-] {cp}")
 
-    print("\n🧵 ATRIBUTOS SUGERIDOS (com IDs prontos para PUT):")
+    # Plano de ação 15 dias
+    plano = laudo.get("plano_de_acao_15_dias") or []
+    if plano:
+        print("\n🗓️  PLANO DE AÇÃO — PRÓXIMOS 15 DIAS:")
+        print("-" * 64)
+        for i, step in enumerate(plano, 1):
+            dia = step.get("dia", f"Passo {i}")
+            acao = step.get("acao", "")
+            detalhe = step.get("detalhe", "")
+            print(f"  [{dia}] {acao}")
+            print(f"         {detalhe}")
+        print("-" * 64)
+
+    print("\n🧵 ATRIBUTOS SUGERIDOS (IDs para PUT):")
     attrs = laudo.get("atributos_sugeridos") or []
     if not attrs:
         print("  (nenhum)")
@@ -914,22 +962,18 @@ def imprimir_laudo(laudo: dict, dados_ml: dict, red_flags: list) -> None:
             nome = a.get("nome_humano") or a.get("id")
             print(f"  [!] {a.get('id'):30s} = {a.get('value_name')}   ({nome})")
 
-    print("\n🩺 AÇÕES DE SAÚDE RECOMENDADAS:")
-    for a in laudo.get("acoes_saude_recomendadas") or ["(nenhuma)"]:
-        print(f"  [>] {a}")
-
     faqs = laudo.get("respostas_perguntas_frequentes") or []
     if faqs:
-        print("\n💬 RESPOSTAS SUGERIDAS PARA PERGUNTAS RECENTES:")
+        print("\n💬 RESPOSTAS SUGERIDAS:")
         for f in faqs:
             print(f"  Q: {f.get('pergunta')}")
             print(f"  A: {f.get('resposta_sugerida')}\n")
 
-    print("\n📝 NOVA DESCRIÇÃO OTIMIZADA (pronta para copiar e colar):")
+    print("\n📝 NOVA DESCRIÇÃO OTIMIZADA:")
     print("-" * 64)
     print(laudo.get("descricao_otimizada"))
     print("-" * 64)
-    print("\n✅ Diagnóstico concluído.")
+    print("\n✅ Diagnóstico de Growth concluído.")
 
 
 # ─── INJEÇÃO DAS MELHORIAS NO MERCADO LIVRE ─────────────────────────────────
