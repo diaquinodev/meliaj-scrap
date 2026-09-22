@@ -1,0 +1,10 @@
+.env
+meli_tokens.json
+dados_jarvis.json
+radar_history.db
+*.db
+debug_*.png
+screenshots/
+fotos_produto/
+__pycache__/
+.venv/
