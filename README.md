@@ -2,6 +2,7 @@
 
 ### Extração de dados de mercado, inteligência de preço e agentes de IA que criam, auditam e publicam anúncios no Mercado Livre
 
+[![CI](https://github.com/diaquinodev/meliaj-scrap/actions/workflows/ci.yml/badge.svg)](https://github.com/diaquinodev/meliaj-scrap/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](requirements.txt)
 [![Gemini](https://img.shields.io/badge/Google%20Gemini-2.5%20Flash-8E75B2?logo=googlegemini&logoColor=white)](https://ai.google.dev/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?logo=streamlit&logoColor=white)](app/radar_app.py)
@@ -91,7 +92,16 @@ Execute sempre a partir da raiz do projeto:
 
 - **Orquestrador de agentes:** unir radar, precificação, ficha técnica, auditoria e publicação num único fluxo com etapas de aprovação humana.
 - Persistir o histórico do radar em banco para acompanhar preços e concorrentes ao longo do tempo.
-- Testes automatizados para a lógica de precificação.
+- Ampliar a cobertura de testes: já cobrem a precificação (`get_factory_bi`), a limpeza de vendas, o parser do scraper (com HTML simulado) e o schema Pydantic da ficha técnica; faltam agentes, integrações e RPA, que dependem de APIs externas.
+
+## 🧪 Testes
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Os testes rodam sem rede e sem chaves de API (o scraper é testado com HTML simulado) e também executam no CI a cada push.
 
 ## 📁 Estrutura
 
@@ -105,7 +115,10 @@ Execute sempre a partir da raiz do projeto:
 │   ├── mercadolivre_oauth.py         # OAuth 2.0 do Mercado Livre
 │   └── descobrir_categoria.py        # Categoria oficial por termo
 ├── api/jarvis_api.py                 # API local para a extensão do Chrome
+├── tests/                            # Testes automatizados (pytest)
+├── .github/workflows/ci.yml          # CI: pytest em Python 3.12
 ├── requirements.txt
+├── requirements-dev.txt              # Dependências + pytest
 └── .env.example
 ```
 
