@@ -8,3 +8,4 @@ screenshots/
 fotos_produto/
 __pycache__/
 .venv/
+.pytest_cache/
