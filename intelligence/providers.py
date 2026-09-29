@@ -44,12 +44,17 @@ class GeminiProvider:
         from google.genai import types
 
         self.model = model
+        provider_schema = Draft.model_json_schema()
+        # O SDK aceita boolean, mas não Literal[True] no schema remoto.
+        # A restrição continua obrigatória na validação local de Draft.
+        provider_schema["properties"]["requires_review"].pop("const", None)
         self.config = types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             response_mime_type="application/json",
-            response_schema=Draft,
+            response_schema=provider_schema,
             temperature=0,
             max_output_tokens=max_output_tokens,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
         self.client = genai.Client(
             api_key=api_key,

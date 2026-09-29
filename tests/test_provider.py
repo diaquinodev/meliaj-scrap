@@ -9,6 +9,38 @@ from intelligence.providers import GeminiProvider, ProviderTimeout
 from intelligence.prompts import SYSTEM_PROMPT
 
 
+def test_real_sdk_serializes_schema_against_mock_http_transport():
+    import json
+    from google import genai
+
+    real_client = genai.Client
+    observed = []
+
+    def handler(request):
+        observed.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "candidates": [{"content": {"parts": [{"text": json.dumps({
+                "title": "Body feminino", "description": "Cor preta confirmada.",
+                "material": None, "requires_review": True})}], "role": "model"},
+                "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 20},
+        })
+
+    def factory(**kwargs):
+        kwargs["http_options"].client_args = {"transport": httpx.MockTransport(handler)}
+        return real_client(**kwargs)
+
+    with patch("google.genai.Client", side_effect=factory):
+        provider = GeminiProvider(api_key="test-only", model="test-model", timeout_seconds=20, max_output_tokens=2048)
+        try:
+            result = provider.generate(ProductInput(name="Body feminino"))
+            assert result.input_tokens == 100
+            assert len(observed) == 1
+            assert observed[0]["generationConfig"]["responseMimeType"] == "application/json"
+        finally:
+            provider.close()
+
+
 def test_sdk_configuration_usage_and_prompt_separation():
     with patch("google.genai.Client") as factory:
         client = factory.return_value
