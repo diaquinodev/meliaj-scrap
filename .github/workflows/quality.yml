@@ -1,4 +1,4 @@
-name: Case quality
+name: VitrineOps quality
 on:
   pull_request:
   push:
@@ -22,4 +22,19 @@ jobs:
         with:
           name: contract-evaluation
           path: evaluation-report.json
-      - run: docker build -t marketplace-intelligence:test .
+      - run: docker build -t vitrineops:test .
+      - name: Smoke test do container
+        shell: bash
+        run: |
+          export SERVICE_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          docker run --detach --rm --name case-api \
+            --publish 127.0.0.1:8001:8001 \
+            --env SERVICE_API_TOKEN --env LLM_MODE=demo vitrineops:test
+          trap 'docker rm --force case-api >/dev/null 2>&1 || true' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8001/health/ready >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          python -m scripts.smoke

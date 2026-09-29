@@ -1,8 +1,8 @@
-# Operação e confiabilidade
+# VitrineOps — operação e confiabilidade
 
 ## Escopo
 
-Serviço síncrono de rascunhos, uma chamada de provedor por solicitação aceita.
+Serviço síncrono de rascunhos do case fictício Aurora Moda, uma chamada de provedor por solicitação aceita.
 Não publica anúncios nem persiste dados. Sem fila durável, SLA contratado ou implantação comprovada.
 
 ## SLOs propostos para homologação
@@ -51,7 +51,7 @@ As regras em monitoring/alerts.yml usam janela curta para diagnóstico; não sã
 ## Deploy e rollback
 
 Pipeline proposto: testes -> avaliação offline -> build -> homologação com avaliação real e carga -> aprovação operacional -> deploy gradual.
-O workflow incluído termina no build; não publica imagem nem faz deploy.
+O workflow incluído termina em um smoke test HTTP do container; não publica imagem nem faz deploy. O smoke test aceita somente loopback e recusa inferência se o serviço não estiver em modo demo.
 
 Antes de exposição externa: TLS, gateway com limite de corpo/taxa por cliente, secret manager, RBAC conforme necessidade, network policies, coleta de métricas, limites de custo e proteção de logs.
 Bearer compartilhado é suficiente para a demo local, não representa identidade/autorização por cliente.

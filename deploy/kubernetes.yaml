@@ -2,16 +2,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: marketplace-intelligence
+  name: vitrineops
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: marketplace-intelligence
+      app: vitrineops
   template:
     metadata:
       labels:
-        app: marketplace-intelligence
+        app: vitrineops
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -21,7 +21,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: api
-          image: marketplace-intelligence:replace-with-published-tag
+          image: vitrineops:replace-with-published-tag
           ports:
             - containerPort: 8001
           env:
@@ -30,7 +30,7 @@ spec:
             - name: SERVICE_API_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: marketplace-intelligence
+                  name: vitrineops
                   key: api-token
           resources:
             requests:
@@ -58,10 +58,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: marketplace-intelligence
+  name: vitrineops
 spec:
   selector:
-    app: marketplace-intelligence
+    app: vitrineops
   ports:
     - port: 8001
       targetPort: 8001

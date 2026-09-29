@@ -110,7 +110,7 @@ def scrape_ml_advanced(query, limit=500, *, session=None, progress=None, sleep=t
                 sleep(1)
             url = base if page == 0 else f"{base}_Desde_{1 + page * 50}"
             try:
-                response = client.get(url, timeout=(5, 20), headers={"User-Agent": "MarketplaceIntelligence/1.0"})
+                response = client.get(url, timeout=(5, 20), headers={"User-Agent": "VitrineOps/1.0"})
                 response.raise_for_status()
             except requests.RequestException as exc:
                 raise ScrapeError(f"Coleta interrompida na página {page + 1}. Verifique conexão ou restrições de acesso.") from exc

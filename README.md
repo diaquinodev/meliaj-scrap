@@ -1,9 +1,17 @@
-# Marketplace Intelligence — case de LLMOps e confiabilidade
+# VitrineOps — Assistente de Catálogo com IA
 
-Projeto de Diego Aquino para apoiar pesquisa de anúncios e preparação de rascunhos de e-commerce.
-O foco deste case é transformar um protótipo em um serviço **testável e observável**, com contratos de dados e tratamento de falhas.
+Case de portfólio desenvolvido por Diego Aquino para a **Aurora Moda, empresa fictícia de e-commerce**.
+O VitrineOps reúne pesquisa de anúncios, simulação de preços e preparação de rascunhos de catálogo em um serviço de IA **testável e observável**.
 
-**Status:** demonstração local e referência de implementação. Não é evidência de operação em produção, SLA cumprido, ganho de conversão ou experiência em treinamento de modelos.
+## Cenário fictício
+
+A Aurora Moda está preparando uma coleção de roupas para vender em marketplaces. No cenário proposto, a equipe de catálogo recebe fichas incompletas, compara ofertas manualmente e revisa textos antes da publicação. O desafio é apoiar esse processo sem inventar características do produto e sem depender de uma chamada de IA que possa travar indefinidamente.
+
+O VitrineOps permite consultar uma amostra de anúncios, simular preço com premissas explícitas e gerar um rascunho a partir de fatos confirmados. A pessoa responsável pelo catálogo mantém a decisão final. A equipe técnica acompanha latência, falhas e consumo de inferência.
+
+**Natureza do case:** a empresa, o contexto comercial e os produtos de demonstração são fictícios. O código, os testes e os mecanismos de confiabilidade são implementações reais. Não há alegação de cliente real, operação em produção, SLA atingido ou ganho financeiro medido.
+
+Leia o [briefing fictício do projeto](docs/cenario-ficticio.md) e o [roteiro de apresentação](docs/entrevista.md).
 
 ## Comece pela demonstração
 
@@ -15,10 +23,26 @@ python -m venv .venv
 python -m pip install -r requirements-dev.txt
 python -m pytest
 python -m evaluation.run --output evaluation-report.json
-python -m streamlit run app/radar_app.py
+python -m scripts.demo --open
 ~~~
 
-No dashboard, clique em **Carregar demonstração offline**. Os dados são sintéticos, sem chave de API ou consulta ao marketplace. As dependências precisam estar instaladas antes da apresentação.
+O comando inicia API e dashboard, carrega dados sintéticos e compartilha um token temporário entre os dois processos. Não é preciso copiar credenciais. No dashboard, abra **Rascunho com IA** e gere um exemplo. O modo é sempre demo e não faz chamadas de inferência pagas, mesmo que o shell tenha configurações de Gemini.
+
+Ctrl+C encerra os dois serviços. Se uma porta estiver ocupada, use 
+`python -m scripts.demo --api-port 8002 --ui-port 8502 --open`.
+As dependências precisam estar instaladas antes da apresentação.
+
+Para validar a inicialização e encerrar automaticamente:
+
+~~~powershell
+python -m scripts.demo --check
+~~~
+
+Esse comando valida dez condições da API por HTTP real, além do health do Streamlit. A suíte também verifica a geração pelo dashboard com uma API em processo separado.
+
+### Execução manual
+
+Se quiser executar apenas o dashboard, use `python -m streamlit run app/radar_app.py` e clique em **Carregar demonstração offline**.
 
 Para usar a aba de rascunhos, inicie a API em outro terminal, com o mesmo ambiente:
 
@@ -125,12 +149,12 @@ Logs `intelligence` usam JSON com request ID, resultado, modo e latência. Confi
 ## Container e Kubernetes
 
 ~~~powershell
-docker build -t marketplace-intelligence:case .
-docker run --rm -p 127.0.0.1:8001:8001 -e SERVICE_API_TOKEN -e LLM_MODE=demo marketplace-intelligence:case
+docker build -t vitrineops:case .
+docker run --rm -p 127.0.0.1:8001:8001 -e SERVICE_API_TOKEN -e LLM_MODE=demo vitrineops:case
 ~~~
 
 A imagem executa como usuário não root e inclui apenas o serviço de rascunhos.
-O CI executa testes, avaliação offline e build da imagem. Nenhuma credencial de inferência é necessária no CI.
+O CI executa testes, avaliação offline, build da imagem e um smoke test do container em execução. Esse teste verifica health, autenticação, rejeição de entrada inválida, geração, revisão humana e métricas. Nenhuma credencial de inferência é necessária no CI.
 
 `deploy/kubernetes.yaml` é um exemplo sem Ingress público. Antes de aplicar, substitua a imagem por uma versão publicada, crie o Secret indicado e dimensione recursos por teste de carga.
 Duas réplicas não demonstram alta disponibilidade por si só: ainda faltam distribuição entre nós/zonas, políticas de rede, TLS, controle de taxa por cliente, coleta de métricas e teste de falhas do cluster.

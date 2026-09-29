@@ -68,7 +68,9 @@ def create_app(settings=None, provider=None):
         if close:
             close()
 
-    app = FastAPI(title="Marketplace Intelligence", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="VitrineOps — Assistente de Catálogo com IA",
+                  description="Case de portfólio para a empresa fictícia Aurora Moda.",
+                  version="1.0.0", lifespan=lifespan)
     app.state.service = service
     security = HTTPBearer(auto_error=False)
 

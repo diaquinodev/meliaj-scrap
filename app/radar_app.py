@@ -26,9 +26,14 @@ def convert_df_to_csv(df):
 
 
 def main():
-    st.set_page_config(page_title="Marketplace Intelligence", page_icon="🎯", layout="wide")
-    st.title("Marketplace Intelligence")
-    st.caption("Pesquisa de mercado, simulação de preço e rascunhos com IA sujeitos a revisão humana.")
+    st.set_page_config(page_title="VitrineOps | Aurora Moda", page_icon="🛍️", layout="wide")
+    st.title("VitrineOps")
+    st.caption("Assistente de Catálogo com IA · Aurora Moda")
+    st.info("Case fictício de portfólio. A Aurora Moda e os dados da demonstração são simulados.")
+    st.caption("Pesquisa de mercado, simulação de preço e rascunhos sujeitos a revisão humana.")
+    if os.getenv("RADAR_DEMO_AUTOLOAD") == "1" and "data" not in st.session_state:
+        st.session_state["data"] = demo_listings()
+        st.session_state["source"] = "Dados sintéticos de demonstração"
     with st.sidebar:
         st.header("Simulação de preço")
         custo = st.number_input("Custo unitário (R$)", min_value=0.01, value=8.0)
@@ -80,7 +85,7 @@ def main():
             st.dataframe(df, hide_index=True, column_config={
                 "link": st.column_config.LinkColumn("Anúncio"),
                 "preco": st.column_config.NumberColumn("Preço", format="R$ %.2f"),
-            }, use_container_width=True)
+            }, width="stretch")
             st.download_button("Exportar CSV", convert_df_to_csv(df), "amostra_mercado.csv", "text/csv")
     with analytics:
         if rows:
@@ -93,7 +98,7 @@ def main():
     with ai:
         st.write("Gere um rascunho pelo serviço local. A resposta informa modo, versão do prompt, latência e uso de tokens.")
         st.caption("Inicie a API conforme o README. O modo demo usa uma fixture determinística, sem chamar um LLM.")
-        with st.form("draft"):
+        with st.form("draft_form"):
             name = st.text_input("Nome do produto", value="Body feminino")
             details = st.text_area("Fatos confirmados sobre o produto")
             material = st.text_input("Material confirmado (opcional)")
@@ -101,7 +106,8 @@ def main():
             generate = st.form_submit_button("Gerar rascunho para revisão")
         if generate:
             try:
-                response = requests.post("http://127.0.0.1:8001/v1/drafts",
+                service_url = os.getenv("SERVICE_API_URL", "http://127.0.0.1:8001").rstrip("/")
+                response = requests.post(service_url + "/v1/drafts",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"name": name, "details": details, "material": material or None}, timeout=(5, 65))
                 if response.status_code == 200:

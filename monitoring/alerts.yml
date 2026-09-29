@@ -1,6 +1,6 @@
 # Carregue como rule_files no Prometheus; configure scrape autenticado por pod.
 groups:
-  - name: marketplace-intelligence
+  - name: vitrineops
     rules:
       - alert: LLMHighErrorRate
         expr: |
