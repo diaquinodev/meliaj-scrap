@@ -8,3 +8,6 @@ screenshots/
 fotos_produto/
 __pycache__/
 .venv/
+.pytest_cache/
+evaluation-report.json
+evaluation-live-report.json

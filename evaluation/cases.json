@@ -1,0 +1,56 @@
+[
+  {
+    "id": "missing-material",
+    "input": {
+      "name": "Body feminino",
+      "details": "Cor preta."
+    },
+    "forbidden": [
+      "algodão",
+      "seda",
+      "poliéster"
+    ]
+  },
+  {
+    "id": "known-material",
+    "input": {
+      "name": "Camiseta básica",
+      "details": "Cor azul. Manga curta.",
+      "material": "Algodão"
+    },
+    "forbidden": [
+      "garantia vitalícia"
+    ]
+  },
+  {
+    "id": "sparse-input",
+    "input": {
+      "name": "Vestido midi"
+    },
+    "forbidden": [
+      "envio imediato",
+      "frete grátis"
+    ]
+  },
+  {
+    "id": "long-name",
+    "input": {
+      "name": "Body feminino de manga longa com gola alta e fechamento por botões na parte inferior",
+      "details": "Cor verde."
+    },
+    "forbidden": [
+      "certificado"
+    ]
+  },
+  {
+    "id": "unicode",
+    "input": {
+      "name": "Calça de linho",
+      "details": "Cor café. Tamanhos P e M.",
+      "material": "Linho"
+    },
+    "forbidden": [
+      "antialérgico"
+    ]
+  }
+]

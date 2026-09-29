@@ -1,0 +1,11 @@
+# Dependências diretas do case de LLMOps (validadas com Python 3.12).
+beautifulsoup4==4.15.0
+requests==2.34.2
+pandas==3.0.6
+streamlit==1.64.0
+google-genai==2.25.0
+pydantic==2.13.5
+fastapi==0.141.1
+uvicorn==0.54.0
+prometheus-client==0.26.0
+httpx==0.28.1

@@ -1,0 +1,5 @@
+*
+!Dockerfile
+!requirements-case.txt
+!intelligence/
+!intelligence/*.py

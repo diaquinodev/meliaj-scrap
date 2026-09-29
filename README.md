@@ -1,113 +1,161 @@
-# 🤖 Marketplace Intelligence — Agentes de IA para E-commerce
+# Marketplace Intelligence — case de LLMOps e confiabilidade
 
-### Extração de dados de mercado, inteligência de preço e agentes de IA que criam, auditam e publicam anúncios no Mercado Livre
+Projeto de Diego Aquino para apoiar pesquisa de anúncios e preparação de rascunhos de e-commerce.
+O foco deste case é transformar um protótipo em um serviço **testável e observável**, com contratos de dados e tratamento de falhas.
 
-[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](requirements.txt)
-[![Gemini](https://img.shields.io/badge/Google%20Gemini-2.5%20Flash-8E75B2?logo=googlegemini&logoColor=white)](https://ai.google.dev/)
-[![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?logo=streamlit&logoColor=white)](app/radar_app.py)
-[![Playwright](https://img.shields.io/badge/Playwright-RPA-2EAD33?logo=playwright&logoColor=white)](rpa/upseller_bot.py)
-[![Mercado Livre API](https://img.shields.io/badge/API-Mercado%20Livre-FFE600?logoColor=black)](https://developers.mercadolivre.com.br/)
+**Status:** demonstração local e referência de implementação. Não é evidência de operação em produção, SLA cumprido, ganho de conversão ou experiência em treinamento de modelos.
 
----
+## Comece pela demonstração
 
-## 📌 O problema
+Python **3.12**. Na raiz do repositório:
 
-Para uma loja de moda que vende no Mercado Livre, cada novo produto exigia horas de trabalho manual:
+~~~powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-dev.txt
+python -m pytest
+python -m evaluation.run --output evaluation-report.json
+python -m streamlit run app/radar_app.py
+~~~
 
-1. **Pesquisar a concorrência:** preços, volume de vendas e quem domina a busca.
-2. **Precificar** sem perder margem depois das taxas do marketplace e das promoções.
-3. **Criar o anúncio:** título com SEO, ficha técnica, categoria correta, fotos e descrição.
-4. **Acompanhar a saúde do anúncio** e corrigir o que o Mercado Livre penaliza.
+No dashboard, clique em **Carregar demonstração offline**. Os dados são sintéticos, sem chave de API ou consulta ao marketplace. As dependências precisam estar instaladas antes da apresentação.
 
-## 💡 A solução
+Para usar a aba de rascunhos, inicie a API em outro terminal, com o mesmo ambiente:
 
-Um conjunto de módulos que **extrai dados, gera insights e usa agentes de IA** em cada etapa, do radar de mercado à publicação.
+~~~powershell
+$env:SERVICE_API_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
+$env:LLM_MODE = "demo"
+python -m uvicorn intelligence.api:create_app --factory --host 127.0.0.1 --port 8001
+~~~
 
-```mermaid
+Guarde o token gerado e informe-o no dashboard. Alternativamente, configure a mesma variável nos dois terminais.
+No Linux/macOS, ative o ambiente com `source .venv/bin/activate` e use `export NOME=valor`.
+
+A documentação interativa fica em [localhost:8001/docs](http://localhost:8001/docs).
+Autentique pelo botão **Authorize** para executar `POST /v1/drafts`:
+
+~~~json
+{
+  "name": "Body feminino",
+  "details": "Cor preta. Manga longa.",
+  "material": null
+}
+~~~
+
+O modo `demo` é uma **fixture determinística**, não uma chamada de IA. A resposta inclui `requires_review: true`, versão do prompt e latência. Tokens/custo desconhecidos aparecem como `null`, nunca como zero inventado.
+
+## Arquitetura do case
+
+~~~mermaid
 flowchart LR
-    subgraph Dados["1 · Extração e insights"]
-        S["Web scraping<br/>500 anúncios (10 páginas)"] --> PD["pandas<br/>métricas de mercado"]
-        PD --> BI["Precificação<br/>margem · taxas · kits"]
-    end
-    subgraph IA["2 · Agentes de IA (Gemini)"]
-        SW["Análise SWOT<br/>do mercado"]
-        FT["Agente de ficha técnica<br/>foto → JSON estruturado"]
-        AU["Auditor de anúncio<br/>saúde + SEO"]
-    end
-    subgraph Exec["3 · Execução"]
-        API["API Mercado Livre<br/>categoria · publicação"]
-        RPA["Robô Playwright<br/>publicação via UpSeller"]
-        EXT["API local<br/>extensão do Chrome"]
-    end
-    PD --> SW
-    FT --> API
-    FT -.->|próximo passo| RPA
-    FT -.->|próximo passo| EXT
-    API --> AU
-```
+  DATA[HTML público ou fixture sintética] --> PARSER[Parser e normalização]
+  PARSER --> UI[Dashboard Streamlit]
+  UI --> PRICE[Precificação determinística]
+  UI --> API[FastAPI autenticada]
+  API --> LIMIT[Concorrência limitada e circuit breaker]
+  LIMIT --> MODEL[Adapter Demo ou Gemini]
+  MODEL --> VALID[Schema e material confirmado]
+  VALID --> REVIEW[Rascunho para revisão humana]
+  API --> OBS[Métricas Prometheus e logs sem conteúdo]
+~~~
 
-## ⚙️ Módulos
+- `app/scraping.py`: parser separado da rede; preço atual com centavos; campos ausentes; deduplicação; limite de 500 itens/10 páginas; timeout; pausa; falhas explícitas.
+- `app/pricing.py`: cálculos em Decimal, validação de parâmetros e contrato compatível com o protótipo.
+- `intelligence/`: API, contratos Pydantic, prompt versionado, adapters de provedor e controles de confiabilidade.
+- `evaluation/`: cinco casos sintéticos de regressão de contrato e afirmações proibidas; gera relatório e código de saída para CI.
+- `tests/`: casos de preço, HTML incompleto, erros HTTP, auth, saída inválida, timeout, circuit breaker, concorrência e dashboard.
+- `monitoring/`, `deploy/`: regras de alerta e exemplo Kubernetes para homologação.
 
-| Módulo | Arquivo | O que faz |
-| :--- | :--- | :--- |
-| **Radar de mercado** | [`app/radar_app.py`](app/radar_app.py) | Dashboard **Streamlit** que extrai até **500 anúncios** de uma busca (10 páginas), consolida preço, desconto, vendas e avaliação com **pandas**, exporta CSV e mostra quem concentra as vendas. |
-| **Inteligência de preço** | `get_factory_bi` | A partir do custo, calcula preço mínimo, preço-alvo, preço de vitrine com "gordura" para promoção, desconto máximo, lucro real e preço de kit com 3 peças, já descontando taxas do marketplace. |
-| **SWOT com IA** | `app/radar_app.py` | O **Gemini** recebe as métricas do mercado e devolve uma análise SWOT numérica para posicionar o produto. |
-| **Agente de ficha técnica** | [`agentes/agente_ficha_tecnica.py`](agentes/agente_ficha_tecnica.py) | Lê as **fotos da peça** e gera título, descrição, tecido, modelo e tipo de manga como **saída estruturada validada com Pydantic**. Depois descobre a categoria oficial, hospeda as fotos no ImgBB e publica pela API do Mercado Livre. |
-| **Auditor de anúncio** | [`agentes/auditor_anuncio.py`](agentes/auditor_anuncio.py) | Coleta dados, descrição e **indicador de saúde** de um anúncio na API e pede ao Gemini um laudo de conversão, regras do marketplace e SEO. |
-| **Robô de publicação (RPA)** | [`rpa/upseller_bot.py`](rpa/upseller_bot.py) | Automação com **Playwright** que faz login no UpSeller e cadastra o anúncio completo (informações, preço, estoque, fotos e variantes), com modo `--headless` e `--debug` com screenshots por etapa. |
-| **Integrações** | [`integracoes/`](integracoes/) | OAuth 2.0 do Mercado Livre (gera `meli_tokens.json`) e descoberta da categoria oficial a partir de um termo. |
-| **API local** | [`api/jarvis_api.py`](api/jarvis_api.py) | Servidor HTTP com CORS liberado que entrega o `dados_jarvis.json` (título, preço e descrição) para uma **extensão do Chrome** preencher formulários. Formato em [`api/dados_jarvis.example.json`](api/dados_jarvis.example.json). |
+O dashboard não publica anúncios. Os scripts originais em `agentes/`, `integracoes/`, `rpa/` e `api/jarvis_api.py` foram preservados como **experimentos legados**, fora do caminho de demonstração e sem as garantias do novo serviço. Alguns fazem uploads/publicações reais quando executados com credenciais. Não estão incluídos na imagem Docker do case.
 
-## 🚀 Como executar
+A antiga SWOT direta no dashboard foi substituída pelo fluxo de rascunho observável. Não há conclusão automática sobre monopólio ou participação de mercado a partir da amostra.
 
-Pré-requisito: Python 3.11+.
+## Inferência real, quando desejada
 
-```bash
-python -m venv .venv && .venv\Scripts\activate
-pip install -r requirements.txt
-playwright install chromium
-copy .env.example .env                     # preencha as chaves
-```
+Configure as variáveis antes de iniciar o serviço (o serviço não carrega `.env` automaticamente):
 
-Execute sempre a partir da raiz do projeto:
+~~~powershell
+$env:LLM_MODE = "gemini"
+$env:GEMINI_API_KEY = "sua-chave"
+$env:GEMINI_MODEL = "gemini-2.5-flash"
+~~~
 
-| Comando | O que faz |
-| :--- | :--- |
-| `streamlit run app/radar_app.py` | Abre o radar de mercado (a chave do Gemini é informada na própria tela) |
-| `python integracoes/mercadolivre_oauth.py TG-xxxx` | Gera o token de acesso do Mercado Livre |
-| `python agentes/agente_ficha_tecnica.py` | Cria e publica um anúncio a partir das fotos em `fotos_produto/` |
-| `python agentes/auditor_anuncio.py` | Pede o código MLB e audita o anúncio |
-| `python rpa/upseller_bot.py --debug` | Publica pelo UpSeller, parando em cada etapa |
-| `python api/jarvis_api.py` | Sobe a API local da extensão na porta 8000 (lê `dados_jarvis.json` da raiz) |
+`SERVICE_API_TOKEN` continua obrigatório. O modelo é configurável; disponibilidade e acesso dependem da sua conta.
+Chamadas reais enviam os dados informados ao provedor e podem gerar custo.
 
-## 🔐 Segurança e boas práticas
+Controles implementados:
+- timeout de 20s configurável, limite de saída de 2048 tokens e nenhuma repetição automática de chamadas faturáveis;
+- até quatro gerações simultâneas por processo; excesso retorna 503;
+- após três falhas consecutivas, circuito aberto por 30s; uma tentativa de prova após o intervalo;
+- 502 para saída inválida; 503 para indisponibilidade; 504 para timeout;
+- material da saída deve coincidir exatamente com o material informado; ausência permanece `null`;
+- token Bearer na geração e nas métricas; revisão humana obrigatória no contrato;
+- nenhuma ferramenta de publicação conectada ao LLM.
 
-- Todas as credenciais (Gemini, Mercado Livre, ImgBB, UpSeller) vêm do **`.env`**, fora do Git; o [`.env.example`](.env.example) lista cada uma.
-- Tokens, bancos locais e screenshots de depuração são ignorados pelo `.gitignore`.
-- A coleta de dados públicos deve respeitar os termos de uso do marketplace e limites de requisição. Para uso contínuo, prefira a API oficial.
+**Limite da validação:** JSON válido e material correto não garantem que todas as frases sejam verdadeiras. Prompt injection e alucinações semânticas ainda exigem avaliação adversarial e revisão humana.
 
-## 🧭 Próximos passos
+## Avaliação
 
-- **Orquestrador de agentes:** unir radar, precificação, ficha técnica, auditoria e publicação num único fluxo com etapas de aprovação humana.
-- Persistir o histórico do radar em banco para acompanhar preços e concorrentes ao longo do tempo.
-- Testes automatizados para a lógica de precificação.
+~~~powershell
+python -m evaluation.run --output evaluation-report.json
+# Opcional, com credenciais e custo de inferência:
+python -m evaluation.run --live --output evaluation-live-report.json
+~~~
 
-## 📁 Estrutura
+A execução padrão verifica o pipeline com fixture; **100% nessa suíte não representa acurácia do Gemini**.
+A execução `--live` mede um conjunto pequeno: tamanho do título, material, revisão humana e termos proibidos.
+Não há LLM-as-judge, avaliação humana automatizada, dados rotulados de clientes, medição de drift nem fine-tuning.
+Veja o [roteiro da entrevista](docs/entrevista.md) para discutir esses limites e a evolução.
 
-```
-├── app/radar_app.py                  # Dashboard Streamlit: scraping, BI de preço, SWOT e cadastro com IA
-├── agentes/
-│   ├── agente_ficha_tecnica.py       # Foto → ficha técnica estruturada → publicação
-│   └── auditor_anuncio.py            # Laudo de saúde e SEO de anúncios
-├── rpa/upseller_bot.py               # Publicação automatizada via Playwright
-├── integracoes/
-│   ├── mercadolivre_oauth.py         # OAuth 2.0 do Mercado Livre
-│   └── descobrir_categoria.py        # Categoria oficial por termo
-├── api/jarvis_api.py                 # API local para a extensão do Chrome
-├── requirements.txt
-└── .env.example
-```
+## Observabilidade e operação
 
----
-Desenvolvido por **Diego Aquino** · [GitHub](https://github.com/diaquinodev) · [LinkedIn](https://linkedin.com/in/diegoaquino87)
+`GET /metrics` exporta:
+- tentativas por resultado e histograma de latência;
+- tokens de entrada/saída reportados pelo provedor, incluindo thinking tokens na saída quando disponíveis;
+- estimativa de custo e contagem de respostas sem usage completo;
+- gerações em andamento.
+
+Para estimar custo, configure `LLM_INPUT_PRICE_PER_MILLION` e `LLM_OUTPUT_PRICE_PER_MILLION` com tarifas conferidas para o modelo/conta. Sem ambas, o custo permanece desconhecido. Essa fórmula simplificada não reconcilia descontos, cache, faixas de preço ou fatura.
+Custos de respostas rejeitadas são contados quando o provedor retorna usage; falhas sem usage não podem ser contabilizadas com precisão.
+
+Logs `intelligence` usam JSON com request ID, resultado, modo e latência. Configure nível INFO no coletor/logging do servidor para capturá-los. Não incluem prompt, resposta ou segredo.
+
+[Runbook e SLOs propostos](docs/operacao.md) descrevem indicadores, incidentes, rollback e limites.
+
+## Container e Kubernetes
+
+~~~powershell
+docker build -t marketplace-intelligence:case .
+docker run --rm -p 127.0.0.1:8001:8001 -e SERVICE_API_TOKEN -e LLM_MODE=demo marketplace-intelligence:case
+~~~
+
+A imagem executa como usuário não root e inclui apenas o serviço de rascunhos.
+O CI executa testes, avaliação offline e build da imagem. Nenhuma credencial de inferência é necessária no CI.
+
+`deploy/kubernetes.yaml` é um exemplo sem Ingress público. Antes de aplicar, substitua a imagem por uma versão publicada, crie o Secret indicado e dimensione recursos por teste de carga.
+Duas réplicas não demonstram alta disponibilidade por si só: ainda faltam distribuição entre nós/zonas, políticas de rede, TLS, controle de taxa por cliente, coleta de métricas e teste de falhas do cluster.
+Circuit breaker e limite de concorrência são por processo, não globais. Use um worker por pod neste exemplo.
+
+## Premissas de preço e dados
+
+A fórmula original calcula **retorno sobre custo**, não margem sobre receita:
+
+~~~text
+preço-alvo = (custo × (1 + retorno/100) + taxa_fixa) / (1 - taxa_percentual)
+preço-vitrine = preço-alvo / (1 - desconto/100)
+~~~
+
+Taxas são hipóteses editáveis, não tabela oficial. Frete, impostos e devoluções estão fora do cálculo. Kit considera uma taxa fixa por venda.
+Valores são exibidos com duas casas; antes de uma cobrança real, defina política de arredondamento monetário.
+As vendas públicas são aproximadas e sem período conhecido; ausência não significa zero vendas.
+Anúncios e kits não são necessariamente comparáveis. A coleta não representa todo o mercado.
+
+## Próximos passos priorizados
+
+1. Homologar o adapter com chamadas reais e avaliação humana de um conjunto representativo.
+2. Configurar telemetria, TLS, secrets manager e limites de custo/taxa por cliente.
+3. Medir carga e disponibilidade antes de assumir SLO/SLA externo.
+4. Persistir jobs, aprovação e auditoria; adicionar fila e orquestração quando houver tarefas longas e reprocessamento.
+5. Medir mudança na distribuição dos inputs e qualidade; avaliar RAG apenas se houver base factual versionada relevante.
+
+Desenvolvido por [Diego Aquino](https://github.com/diaquinodev).
