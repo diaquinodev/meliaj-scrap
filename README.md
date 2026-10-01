@@ -2,7 +2,7 @@
 
 ### Extração de dados de mercado, inteligência de preço e agentes de IA que criam, auditam e publicam anúncios no Mercado Livre
 
-[![CI](https://github.com/diaquinodev/meliaj-scrap/actions/workflows/ci.yml/badge.svg)](https://github.com/diaquinodev/meliaj-scrap/actions/workflows/ci.yml)
+[![CI](https://github.com/diaquinodev/radar-marketplace/actions/workflows/ci.yml/badge.svg)](https://github.com/diaquinodev/radar-marketplace/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](requirements.txt)
 [![Gemini](https://img.shields.io/badge/Google%20Gemini-2.5%20Flash-8E75B2?logo=googlegemini&logoColor=white)](https://ai.google.dev/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?logo=streamlit&logoColor=white)](app/radar_app.py)
